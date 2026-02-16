@@ -5,17 +5,75 @@
 [Error State Kalman Filter (ESKF)](https://www.iri.upc.edu/people/jsola/JoanSola/objectes/notes/kinematics.pdf)
 for testing and comparison purposes.
 
-The Python version is implemented with pytorch and the linearized system
-Jacobian is compared against the automatic differentiation of the error-state
-dynamics.
+The Python version is implemented with pytorch, so that the linearized error
+state dynamics is verified against the automatic differentiation of the
+error-state dynamics.
 
-## Implementation divergence
+The C++ version is implemented with Eigen, and a python binding via pybind11 is
+provided to verify the C++ implementation against the Python one.
 
-Compared to Sola's original formulation, we have made the following changes:
+## Formulas
 
-We order the state as `[p, q, v, b_a, b_g]` instead of `[p, v, q, b_a, b_g]`.
-This is because position and orientation are usually contiguously stored
-together.
+### Nominal State
+
+```math
+\mathbf{x}_k = \begin{bmatrix}
+\mathbf{p}_l \\
+\mathbf{q}_k \\
+\mathbf{v}_k \\
+\mathbf{b}_{a,k} \\
+\mathbf{b}_{g,k}
+\end{bmatrix}
+```
+
+> [!NOTE] <!-- break line -->
+>
+> Compared to Sola's original formulation, we put the orientation `q` right
+> after the position `p` in the state vector, instead of after the velocity `v`.
+> This is because position and orientation are usually stored together, c.f.
+> [`geometry_msgs/Pose`](https://docs.ros2.org/jazzy/api/geometry_msgs/msg/Pose.html)
+> in ROS and
+> [`sophus::SE3`](https://docs.ros.org/en/noetic/api/sophus/html/classSophus_1_1SE3.html)
+
+### Input
+
+```math
+\mathbf{u} = \begin{bmatrix}
+\mathbf{a}_{m,k} \\
+\boldsymbol{\omega}_{m,k}
+\end{bmatrix}
+```
+
+### Nominal dynamics
+
+```math
+\mathbf{x}_{k+1} = \mathbf{f}(\mathbf{x}_{k}, \mathbf{u}_k) \triangleq \begin{bmatrix}
+\mathbf{p}_{k} + \mathbf{v}_{k} \Delta t \\
+\mathbf{q}_{k} \otimes \exp\left\{\boldsymbol{\omega}_k \Delta t\right\} \\
+\mathbf{v}_{k} + \left(\mathbf{R}(\mathbf{q}_{k}) \mathbf{a}_k - \mathbf{g}\right) \Delta t \\
+\mathbf{b}_{a,k} \\
+\mathbf{b}_{g,k}
+\end{bmatrix},
+```
+
+where $\boldsymbol{\omega}\_k = \boldsymbol{\omega}\_{m,k} - \mathbf{b}\_{g,k}$
+and $\mathbf{a}\_k = \mathbf{a}\_{m,k} - \mathbf{b}\_{a,k}$, and
+$\exp\lbrace\cdot\rbrace$ is the quaternion exponential map.
+
+### Linearized error-state dynamics
+
+```math
+\mathbf{F}_k = \begin{bmatrix}
+\mathbf{1} & \mathbf{0} & \Delta t \mathbf{1} & \mathbf{0} & \mathbf{0} \\
+\mathbf{0} & \exp(-\Delta t \boldsymbol{\omega}_k) & \mathbf{0} & \mathbf{0} & -\Delta t \mathbf{1} \\
+\mathbf{0} & -\Delta t\mathbf{R}(\mathbf{q}_{k}) \mathbf{a}_k^\times & \mathbf{1} & -\Delta t \mathbf{R}(\mathbf{q}_{k}) & \mathbf{0} \\
+\mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{1} & \mathbf{0} \\
+\mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{1}
+\end{bmatrix},
+```
+
+where $\exp(\cdot)$ is the conventional SO(3) exponential map and
+$(\cdot)^\times$ is the skew-symmetric operator.
 
 ## Dependencies
 
@@ -46,6 +104,4 @@ uv run pytest
 
 ## Further development
 
-Also compare the C++ implementation against the Python one, or potentially use
-ceres::Jet to autodiff the C++ implementation and compare against the analytical
-Jacobian.
+Use C++-native autodiff techniques to verify the C++ implementation.
