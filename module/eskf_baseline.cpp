@@ -88,5 +88,5 @@ PYBIND11_MODULE(PYBIND11_MODULE_NAME, m) {
   m.doc() = "ESKF Math Bindings";
 
   // Bind for double (standard)
-  declare_eskf_types<double>(m, "");
+  declare_eskf_types<float>(m, "");
 }

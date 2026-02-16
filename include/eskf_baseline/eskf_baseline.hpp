@@ -110,11 +110,11 @@ NominalState<Scalar> kinematics(const NominalState<Scalar>& state,
                                 const Config<Scalar>& cfg = {}) {
   const auto& [p, q, v, accel_bias, gyro_bias] = state;
   const auto& [accel, gyro] = input;
-  const Eigen::Vector3d acc_unbiased = accel - accel_bias;
-  const Eigen::Vector3d accel_world = q * acc_unbiased + cfg.grav_vector;
-  const Eigen::Vector3d delta_velocity = accel_world * dt;
-  const Eigen::Vector3d gyro_unbiased = gyro - gyro_bias;
-  const Eigen::Vector3d delta_angle = gyro_unbiased * dt;
+  const Eigen::Vector3<Scalar> acc_unbiased = accel - accel_bias;
+  const Eigen::Vector3<Scalar> accel_world = q * acc_unbiased + cfg.grav_vector;
+  const Eigen::Vector3<Scalar> delta_velocity = accel_world * dt;
+  const Eigen::Vector3<Scalar> gyro_unbiased = gyro - gyro_bias;
+  const Eigen::Vector3<Scalar> delta_angle = gyro_unbiased * dt;
 
   // f(x, u) =
   // [p + v*dt;
@@ -142,9 +142,9 @@ Jacobians<Scalar> ComputeJacobians(const NominalState<Scalar>& state,
                                    const Config<Scalar>& cfg = {}) {
   const auto& [p, q, v, accel_bias, gyro_bias] = state;
   const auto& [accel, gyro] = input;
-  const Eigen::Vector3d acc_unbiased = accel - accel_bias;
-  const Eigen::Vector3d gyro_unbiased = gyro - gyro_bias;
-  const Eigen::Vector3d delta_angle = gyro_unbiased * dt;
+  const Eigen::Vector3<Scalar> acc_unbiased = accel - accel_bias;
+  const Eigen::Vector3<Scalar> gyro_unbiased = gyro - gyro_bias;
+  const Eigen::Vector3<Scalar> delta_angle = gyro_unbiased * dt;
 
   Eigen::Matrix<Scalar, 15, 15> fjac = Eigen::Matrix<Scalar, 15, 15>::Zero();
 
