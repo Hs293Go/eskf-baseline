@@ -1,6 +1,7 @@
 # Unit-Tested ESKF baseline
 
-Python and C++ implementations of the
+[Python](./src/eskf_baseline/eskf_baseline.py) and
+[C++](./include/eskf_baseline/eskf_baseline.hpp) implementations of the
 [Error State Kalman Filter (ESKF)](https://www.iri.upc.edu/people/jsola/JoanSola/objectes/notes/kinematics.pdf)
 for testing and comparison purposes.
 
