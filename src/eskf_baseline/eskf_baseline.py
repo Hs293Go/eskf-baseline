@@ -199,7 +199,7 @@ class NominalState(NamedTuple):
     accel_bias: torch.Tensor  # Accelerometer bias (3,)
     gyro_bias: torch.Tensor  # Gyroscope bias (3,)
 
-    def perturb(self, delta: torch.Tensor) -> Self:
+    def perturb(self, delta: torch.Tensor) -> "NominalState":
         """
         Perturb the nominal state by a small error state.
 
@@ -247,7 +247,7 @@ def kinematics(
     u: Input,
     dt: torch.Tensor,
     config: Config,
-) -> torch.Tensor:
+) -> NominalState:
     """
     Kinematics function for the ESKF.
 
