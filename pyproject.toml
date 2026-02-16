@@ -1,0 +1,18 @@
+[project]
+name = "eskf-baseline"
+version = "0.1.0"
+description = "Unit-Tested ESKF math baseline"
+readme = "README.md"
+authors = [{ name = "H S Helson Go", email = "hellston20a@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.4.2", "torch>=2.10.0"]
+
+[build-system]
+requires = ["uv_build>=0.9.8,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.0.2"]
+
+[tool.pytest]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
