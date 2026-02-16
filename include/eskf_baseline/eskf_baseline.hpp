@@ -117,7 +117,7 @@ NominalState<Scalar> kinematics(const NominalState<Scalar>& state,
   const Eigen::Vector3d delta_angle = gyro_unbiased * dt;
 
   // f(x, u) =
-  // [p + v*dt + a * dt^2 / 2;
+  // [p + v*dt;
   //  q * Exp(ω*dt);
   //  v + a*dt];
 
