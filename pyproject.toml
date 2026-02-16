@@ -5,14 +5,24 @@ description = "Unit-Tested ESKF math baseline"
 readme = "README.md"
 authors = [{ name = "H S Helson Go", email = "hellston20a@gmail.com" }]
 requires-python = ">=3.12"
-dependencies = ["numpy>=2.4.2", "torch>=2.10.0"]
+dependencies = [
+  "numpy>=2.4.2",
+  "pybind11>=3.0.1",
+  "scikit-build-core>=0.11.6",
+  "torch>=2.10.0",
+]
 
 [build-system]
-requires = ["uv_build>=0.9.8,<0.10.0"]
-build-backend = "uv_build"
+requires = ["scikit-build-core>=0.11.6", "pybind11>=2.13.0"]
+build-backend = "scikit_build_core.build"
 
 [dependency-groups]
 dev = ["pytest>=9.0.2"]
 
 [tool.pytest]
 filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
+
+[tool.scikit-build]
+cmake.version = ">=3.28"
+cmake.build-type = "Release"
+cmake.args = ["-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]

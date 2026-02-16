@@ -32,7 +32,7 @@ Eigen::Quaternion<typename Derived::Scalar> AngleAxisToQuaternion(
   Scalar imag_factor;
   Scalar real_factor;
 
-  if (IsClose(theta_sq, Scalar(0))) {
+  if (theta_sq < Scalar(1e-6)) {
     const Scalar theta_po4 = theta_sq * theta_sq;
     imag_factor = Scalar(0.5) - Scalar(1.0 / 48.0) * theta_sq +
                   Scalar(1.0 / 3840.0) * theta_po4;
@@ -65,7 +65,7 @@ Eigen::Matrix3<typename Derived::Scalar> AngleAxisToRotationMatrix(
   const Eigen::Matrix3<Scalar> hat_phi = hat(angle_axis);
   const Eigen::Matrix3<Scalar> hat_phi_sq = hat_phi * hat_phi;
 
-  if (IsClose(theta_sq, Scalar(0))) {
+  if (theta_sq < Scalar(1e-6)) {
     rotation_matrix += hat_phi + hat_phi_sq / Scalar(2);
   } else {
     const Scalar theta = sqrt(theta_sq);
@@ -85,24 +85,36 @@ struct NominalState {
   Eigen::Vector3<T> p;
   Eigen::Quaternion<T> q;
   Eigen::Vector3<T> v;
-  Eigen::Vector3<T> omega;
+  Eigen::Vector3<T> accel_bias;
+  Eigen::Vector3<T> gyro_bias;
 };
 
-template <typename PDerived, typename QDerived, typename VDerived,
-          typename ADerived, typename GDerived, typename GravDerived,
-          typename Scalar = typename PDerived::Scalar>
-NominalState<typename PDerived::Scalar> kinematics(
-    const Eigen::MatrixBase<PDerived>& p,
-    const Eigen::QuaternionBase<QDerived>& q,
-    const Eigen::MatrixBase<VDerived>& v,
-    const Eigen::MatrixBase<ADerived>& acc_unbiased,
-    const Eigen::MatrixBase<GDerived>& gyr_unbiased, Scalar dt,
-    const Eigen::MatrixBase<GravDerived>& grav_vector =
-        Eigen::Vector3<Scalar>(0, 0, -9.81)) {
-  const Eigen::Vector3d acc_world = q * acc_unbiased + grav_vector;
+template <typename T>
+struct Input {
+  Eigen::Vector3<T> accel;
+  Eigen::Vector3<T> gyro;
+};
 
-  const Eigen::Vector3d delta_velocity = acc_world * dt;
-  const Eigen::Vector3d delta_angle = gyr_unbiased * dt;
+template <typename T>
+struct Config {
+  T accel_noise_density{0.005};
+  T gyro_noise_density{5e-5};
+  T accel_bias_random_walk{0.001};
+  T gyro_bias_random_walk{0.0001};
+  Eigen::Vector3<T> grav_vector{T(0), T(0), T(-9.81)};
+};
+
+template <typename Scalar>
+NominalState<Scalar> kinematics(const NominalState<Scalar>& state,
+                                const Input<Scalar>& input, Scalar dt,
+                                const Config<Scalar>& cfg = {}) {
+  const auto& [p, q, v, accel_bias, gyro_bias] = state;
+  const auto& [accel, gyro] = input;
+  const Eigen::Vector3d acc_unbiased = accel - accel_bias;
+  const Eigen::Vector3d accel_world = q * acc_unbiased + cfg.grav_vector;
+  const Eigen::Vector3d delta_velocity = accel_world * dt;
+  const Eigen::Vector3d gyro_unbiased = gyro - gyro_bias;
+  const Eigen::Vector3d delta_angle = gyro_unbiased * dt;
 
   // f(x, u) =
   // [p + v*dt + a * dt^2 / 2;
@@ -110,10 +122,11 @@ NominalState<typename PDerived::Scalar> kinematics(
   //  v + a*dt];
 
   return {
-      .p = p + v * dt + 0.5 * delta_velocity * dt,
+      .p = p + v * dt,
       .q = q * rotation::AngleAxisToQuaternion(delta_angle),
       .v = v + delta_velocity,
-      .omega = gyr_unbiased,  // Pass through gyro reading for bias estimation
+      .accel_bias = accel_bias,
+      .gyro_bias = gyro_bias,
   };
 }
 
@@ -123,36 +136,21 @@ struct Jacobians {
   Eigen::Matrix<T, 15, 15> qcov;
 };
 
-template <typename T>
-struct NoiseConfig {
-  T accel_noise_density;
-  T gyro_noise_density;
-  T accel_bias_random_walk;
-  T gyro_bias_random_walk;
-};
-
-template <typename PDerived, typename QDerived, typename VDerived,
-          typename ADerived, typename GDerived, typename Cfg,
-          typename GravDerived, typename Scalar = typename PDerived::Scalar>
-Jacobians<typename PDerived::Scalar> ComputeJacobians(
-    const Eigen::MatrixBase<PDerived>& /*p*/,
-    const Eigen::QuaternionBase<QDerived>& q,
-    const Eigen::MatrixBase<VDerived>& /*v*/,
-    const Eigen::MatrixBase<ADerived>& acc_unbiased,
-    const Eigen::MatrixBase<GDerived>& gyr_unbiased, Scalar dt,
-    const Cfg& config,
-    const Eigen::MatrixBase<GravDerived>& grav_vector =
-        Eigen::Vector3<Scalar>(0, 0, -9.81)) {
-  using Eigen::fix;
-  using Eigen::seqN;
-  const Eigen::Vector3d acc_world = q * acc_unbiased + grav_vector;
-
-  const Eigen::Vector3d delta_velocity = acc_world * dt;
-  const Eigen::Vector3d delta_angle = gyr_unbiased * dt;
+template <typename Scalar>
+Jacobians<Scalar> ComputeJacobians(const NominalState<Scalar>& state,
+                                   const Input<Scalar>& input, Scalar dt,
+                                   const Config<Scalar>& cfg = {}) {
+  const auto& [p, q, v, accel_bias, gyro_bias] = state;
+  const auto& [accel, gyro] = input;
+  const Eigen::Vector3d acc_unbiased = accel - accel_bias;
+  const Eigen::Vector3d gyro_unbiased = gyro - gyro_bias;
+  const Eigen::Vector3d delta_angle = gyro_unbiased * dt;
 
   Eigen::Matrix<Scalar, 15, 15> fjac = Eigen::Matrix<Scalar, 15, 15>::Zero();
 
-  const auto seq3 = [](Eigen::Index start) { return seqN(start, fix<3>()); };
+  const auto seq3 = [](Eigen::Index start) {
+    return Eigen::seqN(start, Eigen::fix<3>());
+  };
 
   // F =
   //   [I, O,            dt * I, O,     O    ;
@@ -169,7 +167,7 @@ Jacobians<typename PDerived::Scalar> ComputeJacobians(
 
   const Eigen::Matrix3<Scalar> rmat = q.toRotationMatrix();
   // Velocity
-  fjac(seq3(6), seq3(3)) = -dt * rmat * hat(acc_unbiased);
+  fjac(seq3(6), seq3(3)) = -dt * rmat * rotation::hat(acc_unbiased);
   fjac(seq3(6), seq3(6)).setIdentity();
   fjac(seq3(6), seq3(9)) = -dt * rmat;
 
@@ -188,18 +186,13 @@ Jacobians<typename PDerived::Scalar> ComputeJacobians(
   //             σ_ab * dt * I,    ...
   //             σ_gb * dt * I);
 
-  qcov(seq3(6), seq3(6))
-      .diagonal()
-      .setConstant(dt * dt * config.accel_noise_density);
-  qcov(seq3(3), seq3(3))
-      .diagonal()
-      .setConstant(dt * dt * config.gyro_noise_density);
-  qcov(seq3(9), seq3(9))
-      .diagonal()
-      .setConstant(dt * config.accel_bias_random_walk);
-  qcov(seq3(12), seq3(12))
-      .diagonal()
-      .setConstant(dt * config.gyro_bias_random_walk);
+  const Scalar dt_sq = dt * dt;
+  const auto [accel_noise_density, gyro_noise_density, accel_bias_random_walk,
+              gyro_bias_random_walk, _] = cfg;
+  qcov(seq3(3), seq3(3)).diagonal().setConstant(dt_sq * gyro_noise_density);
+  qcov(seq3(6), seq3(6)).diagonal().setConstant(dt_sq * accel_noise_density);
+  qcov(seq3(9), seq3(9)).diagonal().setConstant(dt * accel_bias_random_walk);
+  qcov(seq3(12), seq3(12)).diagonal().setConstant(dt * gyro_bias_random_walk);
 
   return {.fjac = fjac, .qcov = qcov};
 }
