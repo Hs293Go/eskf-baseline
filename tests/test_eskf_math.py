@@ -1,5 +1,5 @@
 import torch
-from conftest import OperatingPoints
+from conftest import DtypeDevice, OperatingPoints
 
 import eskf_baseline
 
@@ -75,31 +75,29 @@ def test_jacobian_derivation(
 def test_jvp(
     config: eskf_baseline.Config,
     operating_points: OperatingPoints,
+    dtype_device: DtypeDevice,
 ) -> None:
     dt = torch.tensor(0.01, dtype=torch.float32)
 
     num_vecs = 10
-    with torch.autograd.set_detect_anomaly(True):
-        for x, u in zip(*operating_points):
-            # 1. Get hand-derived Jacobian
-            fjac_hand, qcov_hand = torch.compile(eskf_baseline.jacobians)(
-                x, u, dt, config
-            )
 
-            delta0 = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+    vs = torch.randn((len(operating_points[0]), num_vecs, 15), **dtype_device)
+    for x, u, ith_v in zip(*operating_points, vs):
+        # 1. Get hand-derived Jacobian
+        fjac_hand, qcov_hand = torch.compile(eskf_baseline.jacobians)(x, u, dt, config)
 
-            # Function of delta only (so jvp sees a single input)
-            def g(delta: torch.Tensor) -> torch.Tensor:
-                return error_dynamics_wrapper(delta, x, u, dt, config)
+        delta0 = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
 
-            # Random direction vectors
-            for _ in range(num_vecs):
-                v = torch.randn(15, dtype=x.p.dtype, device=x.p.device)
+        # Function of delta only (so jvp sees a single input)
+        def g(delta: torch.Tensor) -> torch.Tensor:
+            return error_dynamics_wrapper(delta, x, u, dt, config)
 
-                # JVP via forward-mode AD
-                _, jvp = torch.func.jvp(g, (delta0,), (v,))
+        # Random direction vectors
+        for v in ith_v:
+            # JVP via forward-mode AD
+            _, jvp = torch.func.jvp(g, (delta0,), (v,))
 
-                # Hand linearization action
-                jvp_expected = fjac_hand @ v
+            # Hand linearization action
+            jvp_expected = fjac_hand @ v
 
-                torch.testing.assert_close(jvp, jvp_expected, rtol=1e-4, atol=1e-4)
+            torch.testing.assert_close(jvp, jvp_expected, rtol=1e-4, atol=1e-4)

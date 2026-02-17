@@ -1,4 +1,5 @@
 import functools
+from typing import TypedDict
 
 import pytest
 import torch
@@ -7,12 +8,19 @@ import eskf_baseline
 
 OperatingPoints = tuple[list[eskf_baseline.NominalState], list[eskf_baseline.Input]]
 
+DtypeDevice = TypedDict("DtypeDevice", {"dtype": torch.dtype, "device": str})
+
 
 @pytest.fixture
-def config():
+def config(dtype_device: DtypeDevice) -> eskf_baseline.Config:
     return eskf_baseline.Config(
-        grav_vector=torch.tensor([0.0, 0.0, -9.81], dtype=torch.float32)
+        grav_vector=torch.as_tensor([0.0, 0.0, -9.81], **dtype_device)
     )
+
+
+@pytest.fixture
+def dtype_device() -> DtypeDevice:
+    return {"dtype": torch.float32, "device": "cpu"}
 
 
 def _random_quaternion(
@@ -32,19 +40,17 @@ def _random_quaternion(
 
 
 @pytest.fixture
-def operating_points() -> OperatingPoints:
-    rand = functools.partial(torch.rand, dtype=torch.float32, device="cpu")
-    randn = functools.partial(torch.randn, dtype=torch.float32, device="cpu")
+def operating_points(dtype_device: DtypeDevice) -> OperatingPoints:
+    rand = functools.partial(torch.rand, **dtype_device)
+    randn = functools.partial(torch.randn, **dtype_device)
     num_trials = 50
     ps = -10 + 20 * rand(num_trials, 3)
-    qs = _random_quaternion(batch_size=num_trials, dtype=torch.float32, device="cpu")
+    qs = _random_quaternion(batch_size=num_trials, **dtype_device)
     vs = -5 + 10 * rand(num_trials, 3)
     abiases = randn(num_trials, 3) * 0.1
     gbiases = randn(num_trials, 3) * 0.01
     # Generate random valid nominal state
-    accs = randn(num_trials, 3) * 0.5 + torch.tensor(
-        [0.0, 0.0, 9.81], dtype=torch.float32, device="cpu"
-    )
+    accs = randn(num_trials, 3) * 0.5 + torch.tensor([0.0, 0.0, 9.81], **dtype_device)
     gyros = randn(num_trials, 3) * 0.1
 
     return (
