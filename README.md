@@ -75,6 +75,52 @@ $\exp\lbrace\cdot\rbrace$ is the quaternion exponential map.
 where $\exp(\cdot)$ is the conventional SO(3) exponential map and
 $(\cdot)^\times$ is the skew-symmetric operator.
 
+### Pose observation
+
+Full pose observation may be sourced from a visual SLAM system, a LIDAR SLAM
+system, or a motion capture system.
+
+```math
+\mathbf{z}_k = \mathbf{h}(\mathbf{x}_k) \triangleq \begin{bmatrix}
+\mathbf{p}_k \\
+\mathbf{q}_k
+\end{bmatrix}
+```
+
+Its linearization is trivial
+
+```math
+\mathbf{H}_k = \begin{bmatrix}
+\mathbf{1} & \mathbf{0} & \mathbf{0} & \mathbf{0} & \mathbf{0} \\
+\mathbf{0} & \mathbf{1} & \mathbf{0} & \mathbf{0} & \mathbf{0}
+\end{bmatrix}.
+```
+
+### Compass observation
+
+Compass observation may be sourced from a magnetometer.
+
+```math
+\mathbf{z}_k = \mathbf{h}(\mathbf{x}_k) \triangleq \mathbf{R}^\top(\mathbf{q}_k) \mathbf{m}
+```
+
+where $\mathbf{m}$ is the magnetic field vector in the world frame. Its
+linearization is:
+
+```math
+\mathbf{H}_k = \begin{bmatrix}
+\mathbf{0} & {\left(\mathbf{R}^\top(\mathbf{q}_k)\right)}^\times & \mathbf{0} & \mathbf{0} & \mathbf{0}
+\end{bmatrix}.
+```
+
+The compass observation is generalizable to all vector observations in the world
+frame, as the relevant Jacobian block is only the derivative of a vector rotated
+into the body frame with respect to the orientation:
+
+```math
+\frac{\partial \mathbf{R}^\top(\mathbf{q}_k) \mathbf{v}}{\partial \boldsymbol{\theta}} = {\left(\mathbf{R}^\top(\mathbf{q}_k)\mathbf{v}\right)}^\times.
+```
+
 ## Dependencies
 
 We use `uv` to manage our python dependencies.
