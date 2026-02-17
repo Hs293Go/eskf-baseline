@@ -192,6 +192,23 @@ def quaternion_product(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     )
 
 
+def rotation_error(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the rotation error between two quaternions.
+
+    This computes q_ab = q_{ia}^{-1} * q_{ib}, where q_{ia} and q_{ib} are
+    orientations in the passive body-to-inertial convention.
+
+    Args:
+        q1 (torch.Tensor): First quaternion (4,)
+        q2 (torch.Tensor): Second quaternion (4,)
+
+    Returns:
+        torch.Tensor: Rotation error in angle-axis representation (3,)
+    """
+    return quaternion_to_angle_axis(quaternion_product(quaternion_inverse(q_a), q_b))
+
+
 class NominalState(NamedTuple):
     p: torch.Tensor  # Position vector (3,)
     q: torch.Tensor  # Orientation quaternion (4,)
@@ -199,9 +216,9 @@ class NominalState(NamedTuple):
     accel_bias: torch.Tensor  # Accelerometer bias (3,)
     gyro_bias: torch.Tensor  # Gyroscope bias (3,)
 
-    def perturb(self, delta: torch.Tensor) -> "NominalState":
+    def boxplus(self, delta: torch.Tensor) -> "NominalState":
         """
-        Perturb the nominal state by a small error state.
+        Perturb the nominal state by a vector in the tangent space.
 
         Args:
             delta (torch.Tensor): Error state (15,)
@@ -217,6 +234,23 @@ class NominalState(NamedTuple):
             accel_bias=self.accel_bias + dba,
             gyro_bias=self.gyro_bias + dbg,
         )
+
+    def boxminus(self, other: "NominalState") -> torch.Tensor:
+        """
+        Compute the error state between this nominal state and another nominal state.
+
+        Args:
+            other (NominalState): Other nominal state
+        Returns:
+            torch.Tensor: Error state (15,)
+                [dp (3), dth (3), dv (3), dba (3), dbg (3)]
+        """
+        dp = self.p - other.p
+        dth = rotation_error(other.q, self.q)
+        dv = self.v - other.v
+        dba = self.accel_bias - other.accel_bias
+        dbg = self.gyro_bias - other.gyro_bias
+        return torch.concat((dp, dth, dv, dba, dbg), dim=0)
 
 
 class Input(NamedTuple):

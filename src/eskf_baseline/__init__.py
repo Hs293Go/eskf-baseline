@@ -10,6 +10,7 @@ from .eskf_baseline import (
     quaternion_rotate_point,
     quaternion_to_angle_axis,
     quaternion_to_rotation_matrix,
+    rotation_error,
 )
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "NominalState",
     "kinematics",
     "jacobians",
+    "rotation_error",
     "quaternion_product",
     "quaternion_rotate_point",
     "quaternion_to_rotation_matrix",

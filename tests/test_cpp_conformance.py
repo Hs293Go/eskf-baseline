@@ -33,6 +33,17 @@ def test_cpp_conformance(config, operating_points, cpp_config, cpp_operating_poi
 
     for x, u, xc, uc in zip(*operating_points, *cpp_operating_points):
         fjac, qcov = torch.compile(eskf_baseline.jacobians)(x, u, dt, config)
+        x_new = torch.compile(eskf_baseline.motion)(x, u, dt, config)
+        x_new_cpp = cpp.motion(xc, uc, dt, cpp_config)
+        testing.assert_allclose(
+            x_new.p.cpu().numpy(), x_new_cpp.p, rtol=1e-4, atol=1e-4
+        )
+        testing.assert_allclose(
+            x_new.q.cpu().numpy(), x_new_cpp.q, rtol=1e-4, atol=1e-4
+        )
+        testing.assert_allclose(
+            x_new.v.cpu().numpy(), x_new_cpp.v, rtol=1e-4, atol=1e-4
+        )
         jacs = cpp.compute_jacobians(xc, uc, dt, cpp_config)
         testing.assert_allclose(fjac.cpu().numpy(), jacs.fjac, rtol=1e-4, atol=1e-4)
         testing.assert_allclose(qcov.cpu().numpy(), jacs.qcov, rtol=1e-4, atol=1e-4)

@@ -12,34 +12,10 @@ def error_dynamics_wrapper(
     config: eskf_baseline.Config,
 ) -> torch.Tensor:
     # 1. Unpack error state
-    dp, dth, dv, dba, dbg = torch.split(delta_x, 3)
+    out_pert = eskf_baseline.motion(x.boxplus(delta_x), u, dt, config)
+    out_nom = eskf_baseline.motion(x, u, dt, config)
 
-    # 2. Inject error (Retraction / ⊕)
-    # Perturb the nominal state
-
-    x_pert = x.perturb(delta_x)
-
-    # 3. Propagate Perturbed & Nominal States
-    out_pert = eskf_baseline.kinematics(x_pert, u, dt, config)
-    out_nom = eskf_baseline.kinematics(x, u, dt, config)
-
-    p_next_pert, q_next_pert, v_next_pert, *_ = out_pert
-    p_next_nom, q_next_nom, v_next_nom, *_ = out_nom
-
-    # 4. Extract Error (Local Coordinates / ⊖)
-    dp_next = p_next_pert - p_next_nom
-    dth_next = eskf_baseline.quaternion_to_angle_axis(
-        eskf_baseline.quaternion_product(
-            eskf_baseline.quaternion_inverse(q_next_nom), q_next_pert
-        )
-    )
-    dv_next = v_next_pert - v_next_nom
-
-    # Biases are deterministically constant in process model
-    dba_next = dba
-    dbg_next = dbg
-
-    return torch.concat([dp_next, dth_next, dv_next, dba_next, dbg_next])
+    return out_pert.boxminus(out_nom)
 
 
 def test_jacobian_derivation(
