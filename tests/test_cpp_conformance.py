@@ -28,11 +28,12 @@ def cpp_config(config: eskf_baseline.Config) -> cpp.Config:
     return cpp.Config(grav_vector=config.grav_vector)
 
 
-def test_cpp_conformance(config, operating_points, cpp_config, cpp_operating_points):
+def test_motion_model_cpp_conformance(
+    config, operating_points, cpp_config, cpp_operating_points
+):
     dt = torch.tensor(0.01, dtype=torch.float32)
 
     for x, u, xc, uc in zip(*operating_points, *cpp_operating_points):
-        fjac, qcov = torch.compile(eskf_baseline.jacobians)(x, u, dt, config)
         x_new = torch.compile(eskf_baseline.motion)(x, u, dt, config)
         x_new_cpp = cpp.motion(xc, uc, dt, cpp_config)
         testing.assert_allclose(
@@ -44,6 +45,38 @@ def test_cpp_conformance(config, operating_points, cpp_config, cpp_operating_poi
         testing.assert_allclose(
             x_new.v.cpu().numpy(), x_new_cpp.v, rtol=1e-4, atol=1e-4
         )
+
+        fjac, qcov = torch.compile(eskf_baseline.motion_jacobians)(x, u, dt, config)
         jacs = cpp.compute_jacobians(xc, uc, dt, cpp_config)
         testing.assert_allclose(fjac.cpu().numpy(), jacs.fjac, rtol=1e-4, atol=1e-4)
         testing.assert_allclose(qcov.cpu().numpy(), jacs.qcov, rtol=1e-4, atol=1e-4)
+
+
+def test_pose_observation_model_cpp_conformance(
+    config, operating_points, cpp_operating_points
+):
+    for x, _, xc, _ in zip(*operating_points, *cpp_operating_points):
+        z = torch.compile(eskf_baseline.pose_observation)(x)
+        z_cpp = cpp.pose_observation(xc)
+        testing.assert_allclose(z.p.cpu().numpy(), z_cpp.p, rtol=1e-4, atol=1e-4)
+        testing.assert_allclose(z.q.cpu().numpy(), z_cpp.q, rtol=1e-4, atol=1e-4)
+
+        hjac = torch.compile(eskf_baseline.pose_observation_jacobian)(x)
+        hjac_cpp = cpp.pose_observation_jacobian(xc)
+        testing.assert_allclose(hjac.cpu().numpy(), hjac_cpp, rtol=1e-4, atol=1e-4)
+
+
+def test_compass_observation_model_cpp_conformance(
+    dtype_device, config, operating_points, cpp_operating_points
+):
+    b = torch.tensor([0.2, 0.3, 0.4], **dtype_device)  # Example magnetic field vector
+    b -= b.dot(config.grav_vector) / config.grav_vector.norm() ** 2 * config.grav_vector
+
+    for x, _, xc, _ in zip(*operating_points, *cpp_operating_points):
+        z = torch.compile(eskf_baseline.compass_observation)(x, b)
+        z_cpp = cpp.compass_observation(xc, b.cpu().numpy())
+        testing.assert_allclose(z.b.cpu().numpy(), z_cpp.b, rtol=1e-4, atol=1e-4)
+
+        hjac = torch.compile(eskf_baseline.compass_observation_jacobian)(x, b)
+        hjac_cpp = cpp.compass_observation_jacobian(xc, b.cpu().numpy())
+        testing.assert_allclose(hjac.cpu().numpy(), hjac_cpp, rtol=1e-4, atol=1e-4)

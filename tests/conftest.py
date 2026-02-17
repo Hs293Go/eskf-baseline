@@ -6,7 +6,10 @@ import torch
 
 import eskf_baseline
 
-OperatingPoints = tuple[list[eskf_baseline.NominalState], list[eskf_baseline.Input]]
+OperatingPoints = tuple[
+    list[eskf_baseline.NominalState],
+    list[eskf_baseline.Input],
+]
 
 DtypeDevice = TypedDict("DtypeDevice", {"dtype": torch.dtype, "device": str})
 

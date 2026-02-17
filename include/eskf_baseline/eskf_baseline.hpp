@@ -105,9 +105,9 @@ struct Config {
 };
 
 template <typename Scalar>
-NominalState<Scalar> kinematics(const NominalState<Scalar>& state,
-                                const Input<Scalar>& input, Scalar dt,
-                                const Config<Scalar>& cfg = {}) {
+NominalState<Scalar> Motion(const NominalState<Scalar>& state,
+                            const Input<Scalar>& input, Scalar dt,
+                            const Config<Scalar>& cfg = {}) {
   const auto& [p, q, v, accel_bias, gyro_bias] = state;
   const auto& [accel, gyro] = input;
   const Eigen::Vector3<Scalar> acc_unbiased = accel - accel_bias;
@@ -137,9 +137,9 @@ struct Jacobians {
 };
 
 template <typename Scalar>
-Jacobians<Scalar> ComputeJacobians(const NominalState<Scalar>& state,
-                                   const Input<Scalar>& input, Scalar dt,
-                                   const Config<Scalar>& cfg = {}) {
+Jacobians<Scalar> MotionJacobians(const NominalState<Scalar>& state,
+                                  const Input<Scalar>& input, Scalar dt,
+                                  const Config<Scalar>& cfg = {}) {
   const auto& [p, q, v, accel_bias, gyro_bias] = state;
   const auto& [accel, gyro] = input;
   const Eigen::Vector3<Scalar> acc_unbiased = accel - accel_bias;
@@ -197,6 +197,46 @@ Jacobians<Scalar> ComputeJacobians(const NominalState<Scalar>& state,
   return {.fjac = fjac, .qcov = qcov};
 }
 
+template <typename T>
+struct Pose {
+  Eigen::Vector3<T> p;
+  Eigen::Quaternion<T> q;
+};
+
+template <typename Scalar>
+Pose<Scalar> PoseObservation(const NominalState<Scalar>& state) {
+  return {.p = state.p, .q = state.q};
+}
+
+template <typename Scalar>
+Eigen::Matrix<Scalar, 6, 15> PoseObservationJacobian(
+    const NominalState<Scalar>& state) {
+  Eigen::Matrix<Scalar, 6, 15> jacobian = Eigen::Matrix<Scalar, 6, 15>::Zero();
+  jacobian.template leftCols<6>().setIdentity();
+  return jacobian;
+}
+
+template <typename T>
+struct CompassVector {
+  Eigen::Vector3<T> b;
+};
+
+template <typename Scalar>
+CompassVector<Scalar> CompassObservation(
+    const NominalState<Scalar>& state,
+    const Eigen::Vector3<Scalar>& b_inertial) {
+  return {.b = state.q.inverse() * b_inertial};
+}
+
+template <typename Scalar>
+Eigen::Matrix<Scalar, 3, 15> CompassObservationJacobian(
+    const NominalState<Scalar>& state,
+    const Eigen::Vector3<Scalar>& mag_inertial) {
+  Eigen::Matrix<Scalar, 3, 15> jacobian = Eigen::Matrix<Scalar, 3, 15>::Zero();
+  jacobian(Eigen::all, Eigen::seqN(3, Eigen::fix<3>)) =
+      rotation::hat(state.q.inverse() * mag_inertial);
+  return jacobian;
+}
 }  // namespace eskf
 
 #endif  // ESKF_MATH_ESKF_MATH_HPP_

@@ -11,12 +11,18 @@ using namespace pybind11::literals;
 template <typename T>
 void declare_eskf_types(py::module& m, const std::string& suffix) {
   using Scalar = T;
-  using eskf::ComputeJacobians;
+  using eskf::CompassObservation;
+  using eskf::CompassObservationJacobian;
+  using eskf::CompassVector;
   using eskf::Config;
   using eskf::Input;
   using eskf::Jacobians;
-  using eskf::kinematics;
+  using eskf::Motion;
+  using eskf::MotionJacobians;
   using eskf::NominalState;
+  using eskf::Pose;
+  using eskf::PoseObservation;
+  using eskf::PoseObservationJacobian;
 
   // 1. Bind Structs
   py::class_<NominalState<Scalar>>(m, ("NominalState" + suffix).c_str())
@@ -67,16 +73,47 @@ void declare_eskf_types(py::module& m, const std::string& suffix) {
                      &Config<Scalar>::gyro_bias_random_walk)
       .def_readwrite("grav_vector", &Config<Scalar>::grav_vector);
 
+  py::class_<Pose<Scalar>>(m, ("Pose" + suffix).c_str())
+      .def(py::init([](const Eigen::Vector3<Scalar>& position,
+                       const Eigen::Vector4<Scalar>& orientation_vec) {
+             Eigen::Quaternion<Scalar> orientation(orientation_vec);
+             return Pose<Scalar>{position, orientation};
+           }),
+           "p"_a = Eigen::Vector3<Scalar>::Zero(),
+           "q"_a = Eigen::Vector4<Scalar>::UnitW())
+      .def_readwrite("p", &Pose<Scalar>::p)
+      .def_property(
+          "q", [](const Pose<Scalar>& self) { return self.q.coeffs(); },
+          [](Pose<Scalar>& self, const Eigen::Vector4<Scalar>& v) {
+            self.q = Eigen::Quaternion<Scalar>(v);
+          });
+
+  py::class_<CompassVector<Scalar>>(m, ("CompassVector" + suffix).c_str())
+      .def(py::init<Eigen::Vector3<Scalar>>(),
+           "b"_a = Eigen::Vector3<Scalar>::Zero())
+      .def_readwrite("b", &CompassVector<Scalar>::b);
+
   py::class_<Jacobians<Scalar>>(m, ("Jacobians" + suffix).c_str())
       .def_readwrite("fjac", &Jacobians<Scalar>::fjac)
       .def_readwrite("qcov", &Jacobians<Scalar>::qcov);
 
   // 2. Bind Functions
-  m.def("kinematics", &kinematics<Scalar>, py::arg("state"), py::arg("input"),
+  m.def("motion", &Motion<Scalar>, py::arg("state"), py::arg("input"),
         py::arg("dt"), py::arg("cfg") = Config<Scalar>{});
 
-  m.def("compute_jacobians", &ComputeJacobians<Scalar>, py::arg("state"),
+  m.def("compute_jacobians", &MotionJacobians<Scalar>, py::arg("state"),
         py::arg("input"), py::arg("dt"), py::arg("cfg") = Config<Scalar>{});
+
+  m.def("pose_observation", &PoseObservation<Scalar>, "state"_a);
+
+  m.def("pose_observation_jacobian", &PoseObservationJacobian<Scalar>,
+        "state"_a);
+
+  m.def("compass_observation", &CompassObservation<Scalar>, "state"_a,
+        "b_inertial"_a);
+
+  m.def("compass_observation_jacobian", &CompassObservationJacobian<Scalar>,
+        "state"_a, "b_inertial"_a);
 }
 
 #ifndef PYBIND11_MODULE_NAME

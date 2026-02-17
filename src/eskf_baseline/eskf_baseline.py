@@ -36,19 +36,24 @@ def quaternion_inverse(q: torch.Tensor) -> torch.Tensor:
     return torch.concat((-q[:3], q[3:4]), dim=0)
 
 
-def quaternion_rotate_point(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+def quaternion_rotate_point(
+    q: torch.Tensor, v: torch.Tensor, invert: bool = False
+) -> torch.Tensor:
     """
     Rotate a point by a quaternion.
 
-    Args:
-        q (torch.Tensor): Quaternion (4,)
-        v (torch.Tensor): Point to rotate (3,)
+    Args
+    ----
+    q (torch.Tensor): Quaternion (4,)
+    v (torch.Tensor): Point to rotate (3,)
+    invert (bool): If True, rotate by the inverse of the quaternion
 
-    Returns:
-        torch.Tensor: Rotated point (3,)
+    Returns
+    -------
+    torch.Tensor: Rotated point (3,)
     """
     w = q[3]
-    vec = q[:3]
+    vec = q[:3] if not invert else -q[:3]
     vx = torch.cross(vec, v, dim=0)
     return v + 2 * (w * vx + torch.cross(vec, vx, dim=0))
 
@@ -276,14 +281,9 @@ class Config:
     gyro_bias_random_walk: float = 0.0001
 
 
-def kinematics(
-    x: NominalState,
-    u: Input,
-    dt: torch.Tensor,
-    config: Config,
-) -> NominalState:
+def motion(x: NominalState, u: Input, dt: torch.Tensor, config: Config) -> NominalState:
     """
-    Kinematics function for the ESKF.
+    Motion model for the ESKF.
 
     Args
     ----
@@ -311,11 +311,11 @@ def kinematics(
     )
 
 
-def jacobians(
+def motion_jacobians(
     x: NominalState, u: Input, dt: torch.Tensor, config: Config
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute the Jacobians of the kinematics function.
+    Compute the Jacobians of the motion model.
 
     Args
     ----
@@ -354,3 +354,116 @@ def jacobians(
     qcov[12:15, 12:15] = (config.gyro_bias_random_walk * dt) ** 2 * eye3
 
     return fjac, qcov
+
+
+class PoseObservation(NamedTuple):
+    p: torch.Tensor  # Position vector (3,)
+    q: torch.Tensor  # Orientation quaternion (4,)
+
+    def boxminus(self, other: "PoseObservation") -> torch.Tensor:
+        """
+        Compute the innovation between this pose observation and another pose observation.
+
+        Args
+        ----
+        other (PoseObservation): Other pose observation
+
+        Returns
+        -------
+        torch.Tensor: Innovation (6,)
+            [dp (3), dth (3)]
+        """
+        dp = self.p - other.p
+        dth = rotation_error(other.q, self.q)
+        return torch.concat((dp, dth), dim=0)
+
+
+def pose_observation(x: NominalState) -> PoseObservation:
+    """
+    Pose observation function.
+
+    Args
+    ----
+    x (NominalState): Nominal state
+
+    Returns
+    -------
+    PoseObservation: Pose observation
+    """
+
+    return PoseObservation(p=x.p, q=x.q)
+
+
+def pose_observation_jacobian(x: NominalState) -> torch.Tensor:
+    """
+    Compute the Jacobian of the pose observation function.
+
+    Args
+    ----
+    x (NominalState): Nominal state
+
+    Returns
+    -------
+    torch.Tensor: Jacobian of the pose observation function (7, 15)
+    """
+    jac = torch.zeros((6, 15), dtype=x.p.dtype, device=x.p.device)
+    jac[0:3, 0:3] = torch.eye(3, dtype=x.p.dtype, device=x.p.device)
+    jac[3:6, 3:6] = torch.eye(3, dtype=x.p.dtype, device=x.p.device)
+    return jac
+
+
+class CompassObservation(NamedTuple):
+    b: torch.Tensor  # Body-frame magnetic field vector (3,)
+
+    def boxminus(self, other: "CompassObservation") -> torch.Tensor:
+        """
+        Compute the innovation between this compass observation and another compass observation
+
+        Args
+        ----
+        other (CompassObservation): Other compass observation
+
+        Returns
+        -------
+        torch.Tensor: Innovation (3,)
+        """
+        return self.b - other.b
+
+
+def compass_observation(
+    x: NominalState, mag_inertial: torch.Tensor
+) -> CompassObservation:
+    """
+    Compass observation function.
+
+    Args
+    ----
+    x (NominalState): Nominal state
+    mag_inertial (torch.Tensor): Inertial magnetic field vector (3,)
+
+    Returns
+    -------
+    CompassObservation: Compass observation
+    """
+    b = quaternion_rotate_point(x.q, mag_inertial, invert=True)
+    return CompassObservation(b=b)
+
+
+def compass_observation_jacobian(
+    x: NominalState, mag_inertial: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compute the Jacobian of the compass observation function.
+
+    Args
+    ----
+    x (NominalState): Nominal state
+    mag_inertial (torch.Tensor): Inertial magnetic field vector (3,)
+
+    Returns
+    -------
+    torch.Tensor: Jacobian of the compass observation function (3, 15)
+    """
+    jac = torch.zeros((3, 15), dtype=x.p.dtype, device=x.p.device)
+    jac[:, 3:6] = hat(quaternion_rotate_point(x.q, mag_inertial, invert=True))
+    return jac
