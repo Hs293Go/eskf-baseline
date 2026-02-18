@@ -26,7 +26,7 @@ def dtype_device() -> DtypeDevice:
     return {"dtype": torch.float32, "device": "cpu"}
 
 
-def _random_quaternion(
+def random_quaternion(
     batch_size: int = 1, dtype=torch.float32, device="cpu"
 ) -> torch.Tensor:
     u1 = torch.rand(batch_size, dtype=dtype, device=device)
@@ -48,7 +48,7 @@ def operating_points(dtype_device: DtypeDevice) -> OperatingPoints:
     randn = functools.partial(torch.randn, **dtype_device)
     num_trials = 50
     ps = -10 + 20 * rand(num_trials, 3)
-    qs = _random_quaternion(batch_size=num_trials, **dtype_device)
+    qs = random_quaternion(batch_size=num_trials, **dtype_device)
     vs = -5 + 10 * rand(num_trials, 3)
     abiases = randn(num_trials, 3) * 0.1
     gbiases = randn(num_trials, 3) * 0.01

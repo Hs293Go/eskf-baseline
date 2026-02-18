@@ -13,13 +13,10 @@ def hat(v: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: Hat operator of the input vector (3, 3)
     """
-    res = torch.zeros((3, 3), dtype=v.dtype, device=v.device)
-    res[0, 1] = -v[2]
-    res[0, 2] = v[1]
-    res[1, 0] = v[2]
-    res[1, 2] = -v[0]
-    res[2, 0] = -v[1]
-    res[2, 1] = v[0]
+    zero = torch.zeros_like(v[..., 0], dtype=v.dtype, device=v.device)
+    res = torch.stack(
+        [zero, -v[2], v[1], v[2], zero, -v[0], -v[1], v[0], zero]
+    ).reshape(3, 3)
     return res
 
 
@@ -53,7 +50,7 @@ def quaternion_rotate_point(
     torch.Tensor: Rotated point (3,)
     """
     w = q[3]
-    vec = q[:3] if not invert else -q[:3]
+    vec = torch.where(torch.as_tensor(invert, dtype=torch.bool), -q[:3], q[:3])
     vx = torch.cross(vec, v, dim=0)
     return v + 2 * (w * vx + torch.cross(vec, vx, dim=0))
 
@@ -77,8 +74,16 @@ def angle_axis_to_quaternion(angle_axis: torch.Tensor) -> torch.Tensor:
 
     # series expansions around 0
     theta_po4 = theta_sq**2
-    imag_series = 0.5 - (1.0 / 48.0) * theta_sq + (1.0 / 3840.0) * theta_po4
-    real_series = 1.0 - (1.0 / 8.0) * theta_sq + (1.0 / 384.0) * theta_po4
+    imag_series = (
+        torch.as_tensor([0.5], dtype=angle_axis.dtype, device=angle_axis.device)
+        - (1.0 / 48.0) * theta_sq
+        + (1.0 / 3840.0) * theta_po4
+    )
+    real_series = (
+        torch.as_tensor([1.0], dtype=angle_axis.dtype, device=angle_axis.device)
+        - (1.0 / 8.0) * theta_sq
+        + (1.0 / 384.0) * theta_po4
+    )
 
     imag_general = sin_half / theta
     real_general = cos_half
@@ -164,16 +169,19 @@ def quaternion_to_rotation_matrix(q: torch.Tensor) -> torch.Tensor:
     tyz = tz * q[1]
     tzz = tz * q[2]
 
-    res = torch.empty((3, 3), dtype=q.dtype, device=q.device)
-    res[0, 0] = 1 - (tyy + tzz)
-    res[0, 1] = txy - twz
-    res[0, 2] = txz + twy
-    res[1, 0] = txy + twz
-    res[1, 1] = 1 - (txx + tzz)
-    res[1, 2] = tyz - twx
-    res[2, 0] = txz - twy
-    res[2, 1] = tyz + twx
-    res[2, 2] = 1 - (txx + tyy)
+    res = torch.stack(
+        [
+            1 - (tyy + tzz),
+            txy - twz,
+            txz + twy,
+            txy + twz,
+            1 - (txx + tzz),
+            tyz - twx,
+            txz - twy,
+            tyz + twx,
+            1 - (txx + tyy),
+        ],
+    ).reshape(3, 3)
     return res
 
 
@@ -212,6 +220,18 @@ def rotation_error(q_a: torch.Tensor, q_b: torch.Tensor) -> torch.Tensor:
         torch.Tensor: Rotation error in angle-axis representation (3,)
     """
     return quaternion_to_angle_axis(quaternion_product(quaternion_inverse(q_a), q_b))
+
+
+def rotated_vector_by_perturbation_jacobian(
+    q: torch.Tensor, v: torch.Tensor
+) -> torch.Tensor:
+    return -quaternion_to_rotation_matrix(q) @ hat(v)
+
+
+def inversely_rotated_vector_by_perturbation_jacobian(
+    q: torch.Tensor, v: torch.Tensor
+) -> torch.Tensor:
+    return hat(quaternion_rotate_point(q, v, invert=True))
 
 
 class NominalState(NamedTuple):
@@ -339,10 +359,9 @@ def motion_jacobians(
     fjac[3:6, 3:6] = angle_axis_to_rotation_matrix(-delta_angle)
     fjac[3:6, 12:15] = -dt * eye3
 
-    rmat = quaternion_to_rotation_matrix(q)
-    fjac[6:9, 3:6] = -dt * rmat @ hat(accel_unbiased)
+    fjac[6:9, 3:6] = dt * rotated_vector_by_perturbation_jacobian(q, accel_unbiased)
     fjac[6:9, 6:9] = eye3
-    fjac[6:9, 9:12] = -dt * rmat
+    fjac[6:9, 9:12] = -dt * quaternion_to_rotation_matrix(q)
 
     fjac[9:12, 9:12] = eye3
     fjac[12:15, 12:15] = eye3
@@ -465,5 +484,5 @@ def compass_observation_jacobian(
     torch.Tensor: Jacobian of the compass observation function (3, 15)
     """
     jac = torch.zeros((3, 15), dtype=x.p.dtype, device=x.p.device)
-    jac[:, 3:6] = hat(quaternion_rotate_point(x.q, mag_inertial, invert=True))
+    jac[:, 3:6] = inversely_rotated_vector_by_perturbation_jacobian(x.q, mag_inertial)
     return jac

@@ -6,6 +6,7 @@ from .eskf_baseline import (
     angle_axis_to_quaternion,
     compass_observation,
     compass_observation_jacobian,
+    inversely_rotated_vector_by_perturbation_jacobian,
     motion,
     motion_jacobians,
     pose_observation,
@@ -15,6 +16,7 @@ from .eskf_baseline import (
     quaternion_rotate_point,
     quaternion_to_angle_axis,
     quaternion_to_rotation_matrix,
+    rotated_vector_by_perturbation_jacobian,
     rotation_error,
 )
 
@@ -36,4 +38,6 @@ __all__ = [
     "angle_axis_to_quaternion",
     "quaternion_to_angle_axis",
     "quaternion_inverse",
+    "rotated_vector_by_perturbation_jacobian",
+    "inversely_rotated_vector_by_perturbation_jacobian",
 ]
