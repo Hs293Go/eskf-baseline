@@ -46,3 +46,5 @@ else()
   message(STATUS "MODULE_NAME not defined, skipping Python module build")
 endif()
 
+add_executable(main main.cpp)
+target_link_libraries(main PRIVATE ${SKBUILD_PROJECT_NAME}::eskf_baseline)

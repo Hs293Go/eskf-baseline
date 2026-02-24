@@ -76,6 +76,31 @@ Eigen::Matrix3<typename Derived::Scalar> AngleAxisToRotationMatrix(
 
   return rotation_matrix;
 }
+
+template <typename Derived>
+Eigen::Vector<typename Derived::Scalar, 3> QuaternionToAngleAxis(
+    const Eigen::QuaternionBase<Derived>& quaternion) {
+  using T = typename Derived::Scalar;
+
+  using std::atan2;
+  using std::sqrt;
+  const T squared_n = quaternion.vec().squaredNorm();
+  const T& w = quaternion.w();
+
+  T two_atan_nbyw_by_n;
+
+  if (squared_n < T(1e-6)) {
+    const T squared_w = w * w;
+    two_atan_nbyw_by_n =
+        T(2.0) / w - T(2.0 / 3.0) * (squared_n) / (w * squared_w);
+  } else {
+    const T n = sqrt(squared_n);
+    const T atan_nbyw = (w < T(0)) ? atan2(-n, -w) : atan2(n, w);
+    two_atan_nbyw_by_n = T(2) * atan_nbyw / n;
+  }
+
+  return two_atan_nbyw_by_n * quaternion.vec();
+}
 }  // namespace eskf::rotation
 
 #endif  // ESKF_BASELINE_MATH_HPP_

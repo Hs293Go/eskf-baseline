@@ -13,6 +13,16 @@ struct NominalState {
   Eigen::Vector3<T> v;
   Eigen::Vector3<T> accel_bias;
   Eigen::Vector3<T> gyro_bias;
+
+  NominalState<T> boxplus(const Eigen::Matrix<T, 15, 1>& delta) const {
+    return {
+        .p = p + delta.template head<3>(),
+        .q = q * rotation::AngleAxisToQuaternion(delta.template segment<3>(3)),
+        .v = v + delta.template segment<3>(6),
+        .accel_bias = accel_bias + delta.template segment<3>(9),
+        .gyro_bias = gyro_bias + delta.template segment<3>(12),
+    };
+  }
 };
 
 template <typename T>
@@ -62,6 +72,8 @@ struct Jacobians {
   Eigen::Matrix<T, 15, 15> qcov;
 };
 
+auto seq3(auto start) { return Eigen::seqN(start, Eigen::fix<3>()); };
+
 template <typename Scalar>
 Jacobians<Scalar> MotionJacobians(const NominalState<Scalar>& state,
                                   const ImuInput<Scalar>& input, Scalar dt,
@@ -73,10 +85,6 @@ Jacobians<Scalar> MotionJacobians(const NominalState<Scalar>& state,
   const Eigen::Vector3<Scalar> delta_angle = gyro_unbiased * dt;
 
   Eigen::Matrix<Scalar, 15, 15> fjac = Eigen::Matrix<Scalar, 15, 15>::Zero();
-
-  const auto seq3 = [](Eigen::Index start) {
-    return Eigen::seqN(start, Eigen::fix<3>());
-  };
 
   // F =
   //   [I, O,            dt * I, O,     O    ;
@@ -127,6 +135,13 @@ template <typename T>
 struct Pose {
   Eigen::Vector3<T> p;
   Eigen::Quaternion<T> q;
+
+  Eigen::Vector<T, 6> boxminus(const Pose<T>& other) const {
+    Eigen::Vector<T, 6> res;
+    res(seq3(0)) = p - other.p,
+    res(seq3(3)) = rotation::QuaternionToAngleAxis(other.q.inverse() * q);
+    return res;
+  }
 };
 
 template <typename Scalar>
