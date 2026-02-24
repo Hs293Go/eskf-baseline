@@ -15,7 +15,7 @@ void declare_eskf_types(py::module& m, const std::string& suffix) {
   using eskf::CompassObservationJacobian;
   using eskf::CompassVector;
   using eskf::Config;
-  using eskf::Input;
+  using eskf::ImuInput;
   using eskf::Jacobians;
   using eskf::Motion;
   using eskf::MotionJacobians;
@@ -50,12 +50,12 @@ void declare_eskf_types(py::module& m, const std::string& suffix) {
       .def_readwrite("accel_bias", &NominalState<Scalar>::accel_bias)
       .def_readwrite("gyro_bias", &NominalState<Scalar>::gyro_bias);
 
-  py::class_<Input<Scalar>>(m, ("Input" + suffix).c_str())
+  py::class_<ImuInput<Scalar>>(m, ("ImuInput" + suffix).c_str())
       .def(py::init<Eigen::Vector3<Scalar>, Eigen::Vector3<Scalar>>(),
            "accel"_a = Eigen::Vector3<Scalar>::Zero(),
            "gyro"_a = Eigen::Vector3<Scalar>::Zero())
-      .def_readwrite("accel", &Input<Scalar>::accel)
-      .def_readwrite("gyro", &Input<Scalar>::gyro);
+      .def_readwrite("accel", &ImuInput<Scalar>::accel)
+      .def_readwrite("gyro", &ImuInput<Scalar>::gyro);
 
   py::class_<Config<Scalar>>(m, ("Config" + suffix).c_str())
       .def(py::init<Scalar, Scalar, Scalar, Scalar, Eigen::Vector3<Scalar>>(),

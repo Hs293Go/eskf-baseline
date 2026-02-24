@@ -90,7 +90,7 @@ struct NominalState {
 };
 
 template <typename T>
-struct Input {
+struct ImuInput {
   Eigen::Vector3<T> accel;
   Eigen::Vector3<T> gyro;
 };
@@ -106,7 +106,7 @@ struct Config {
 
 template <typename Scalar>
 NominalState<Scalar> Motion(const NominalState<Scalar>& state,
-                            const Input<Scalar>& input, Scalar dt,
+                            const ImuInput<Scalar>& input, Scalar dt,
                             const Config<Scalar>& cfg = {}) {
   const auto& [p, q, v, accel_bias, gyro_bias] = state;
   const auto& [accel, gyro] = input;
@@ -138,7 +138,7 @@ struct Jacobians {
 
 template <typename Scalar>
 Jacobians<Scalar> MotionJacobians(const NominalState<Scalar>& state,
-                                  const Input<Scalar>& input, Scalar dt,
+                                  const ImuInput<Scalar>& input, Scalar dt,
                                   const Config<Scalar>& cfg = {}) {
   const auto& [p, q, v, accel_bias, gyro_bias] = state;
   const auto& [accel, gyro] = input;

@@ -8,7 +8,7 @@ import eskf_baseline
 
 OperatingPoints = tuple[
     list[eskf_baseline.NominalState],
-    list[eskf_baseline.Input],
+    list[eskf_baseline.ImuInput],
 ]
 
 DtypeDevice = TypedDict("DtypeDevice", {"dtype": torch.dtype, "device": str})
@@ -58,5 +58,5 @@ def operating_points(dtype_device: DtypeDevice) -> OperatingPoints:
 
     return (
         list(map(eskf_baseline.NominalState, ps, qs, vs, abiases, gbiases)),
-        list(map(eskf_baseline.Input, accs, gyros)),
+        list(map(eskf_baseline.ImuInput, accs, gyros)),
     )

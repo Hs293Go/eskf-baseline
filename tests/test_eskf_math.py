@@ -7,7 +7,7 @@ import eskf_baseline
 def error_dynamics_wrapper(
     delta_x: torch.Tensor,
     x: eskf_baseline.NominalState,
-    u: eskf_baseline.Input,
+    u: eskf_baseline.ImuInput,
     dt: torch.Tensor,
     config: eskf_baseline.Config,
 ) -> torch.Tensor:

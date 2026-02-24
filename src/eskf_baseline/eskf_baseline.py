@@ -278,7 +278,7 @@ class NominalState(NamedTuple):
         return torch.concat((dp, dth, dv, dba, dbg), dim=0)
 
 
-class Input(NamedTuple):
+class ImuInput(NamedTuple):
     accel: torch.Tensor  # Unbiased acceleration vector (3,)
     gyro: torch.Tensor  # Unbiased gyroscope vector (3,)
 
@@ -301,14 +301,16 @@ class Config:
     gyro_bias_random_walk: float = 0.0001
 
 
-def motion(x: NominalState, u: Input, dt: torch.Tensor, config: Config) -> NominalState:
+def motion(
+    x: NominalState, u: ImuInput, dt: torch.Tensor, config: Config
+) -> NominalState:
     """
     Motion model for the ESKF.
 
     Args
     ----
     x (NominalState): Nominal state
-    u (Input): Input
+    u (ImuInput): Input
     dt (torch.Tensor): Time step (scalar)
     config (Config): Configuration parameters
     """
@@ -332,7 +334,7 @@ def motion(x: NominalState, u: Input, dt: torch.Tensor, config: Config) -> Nomin
 
 
 def motion_jacobians(
-    x: NominalState, u: Input, dt: torch.Tensor, config: Config
+    x: NominalState, u: ImuInput, dt: torch.Tensor, config: Config
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute the Jacobians of the motion model.
@@ -340,7 +342,7 @@ def motion_jacobians(
     Args
     ----
     x (NominalState): Nominal state
-    u (Input): Input
+    u (ImuInput): Input
     dt (torch.Tensor): Time step (scalar)
     config (Config): Configuration parameters
 

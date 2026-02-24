@@ -1,6 +1,6 @@
 from .eskf_baseline import (
     Config,
-    Input,
+    ImuInput,
     NominalState,
     PoseObservation,
     angle_axis_to_quaternion,
@@ -22,7 +22,7 @@ from .eskf_baseline import (
 
 __all__ = [
     "Config",
-    "Input",
+    "ImuInput",
     "NominalState",
     "PoseObservation",
     "motion",

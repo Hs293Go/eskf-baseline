@@ -18,7 +18,7 @@ def cpp_operating_points(operating_points: OperatingPoints):
     return tuple(
         [
             [cpp.NominalState(*_convert(args)) for args in operating_points[0]],
-            [cpp.Input(*_convert(args)) for args in operating_points[1]],
+            [cpp.ImuInput(*_convert(args)) for args in operating_points[1]],
         ]
     )
 
