@@ -13,8 +13,13 @@ find_package(pybind11 CONFIG REQUIRED)
 add_library(${SKBUILD_PROJECT_NAME}_eskf_baseline INTERFACE)
 target_sources(
   ${SKBUILD_PROJECT_NAME}_eskf_baseline
-  INTERFACE FILE_SET HEADERS BASE_DIRS include FILES
-            include/eskf_baseline/eskf_baseline.hpp)
+  INTERFACE FILE_SET
+            HEADERS
+            BASE_DIRS
+            include
+            FILES
+            include/eskf_baseline/eskf_baseline.hpp
+            include/eskf_baseline/math.hpp)
 target_compile_features(${SKBUILD_PROJECT_NAME}_eskf_baseline
                         INTERFACE cxx_std_20)
 target_link_libraries(${SKBUILD_PROJECT_NAME}_eskf_baseline
