@@ -25,4 +25,7 @@ filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
 [tool.scikit-build]
 cmake.version = ">=3.28"
 cmake.build-type = "Release"
-cmake.args = ["-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"]
+cmake.args = [
+  "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+  "-DMODULE_NAME=eskf_baseline_cpp",
+]
