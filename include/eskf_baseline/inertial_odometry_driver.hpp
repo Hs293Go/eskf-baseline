@@ -80,6 +80,20 @@ struct Checkpoint {
   bool empty() const { return ckpts_.empty(); }
 };
 
+struct StalenessStatus {
+  double imu_head_t;         // if no IMU, -inf
+  double post_t;             // current published context time
+  double processed_up_to_t;  // latest time for which meas are fully fused
+  std::optional<double> late_meas_trigger_t;  // earliest late meas waiting
+  bool rebuilding;                            // rebuild_.has_value()
+
+  // Derived:
+  double imu_lag;   // imu_head_t - post_t (how far post lags IMU horizon)
+  double meas_lag;  // imu_head_t - processed_up_to_t (how far meas fusion lags
+                    // horizon)
+  double trigger_age;  // imu_head_t - late_meas_trigger_t (if any)
+};
+
 template <typename T>
 concept HasEstimationQuantities = requires {
   requires TimeStamped<typename T::Context>;
@@ -97,94 +111,98 @@ concept KalmanFilterAlgorithm =
 
 template <KalmanFilterAlgorithm Algorithm>
 class InertialOdometryDriver {
+ public:
   using Context = typename Algorithm::Context;
   using Measurement = typename Algorithm::Measurement;
   using Input = typename Algorithm::Input;
 
-  Algorithm alg_;
+  StalenessStatus status() const {
+    std::shared_lock lock(mtx_);
+    const double imu_head = imus_.empty()
+                                ? -std::numeric_limits<double>::infinity()
+                                : imus_.back().t;
 
-  // Time-ordered measurement history
-  std::deque<Measurement> meas_hist_;
+    StalenessStatus s{
+        .imu_head_t = imu_head,
+        .post_t = post_.t,
+        .processed_up_to_t = processed_up_to_t_,
+        .late_meas_trigger_t = late_meas_trigger_t_,
+        .rebuilding = rebuild_.has_value(),
+    };
 
-  // measurement frontier: all prior measurements are fused into the posterior
-  double processed_up_to_t_ = -std::numeric_limits<double>::infinity();
+    s.imu_lag = s.imu_head_t - s.post_t;
+    s.meas_lag = s.imu_head_t - s.processed_up_to_t;
+    if (s.late_meas_trigger_t) {
+      s.trigger_age = s.imu_head_t - *s.late_meas_trigger_t;
+    } else {
+      s.trigger_age = 0.0;
+    }
+    return s;
+  }
 
-  // next measurement in meas_hist_ to be processed in normal streaming mode
-  size_t meas_next_idx_ = 0;
-
-  std::deque<Input> imus_;
-
-  Context prio;
-  Context post;
-
-  // time-ordered checkpoint history covering (head_t - max_age) until head_t
-  Checkpoint<Context> ckpts_;
-  double max_ckpt_age_ = 10.0;
-
-  std::shared_mutex mtx;
-  std::condition_variable_any cv;
-  std::jthread thread;
-
-  struct RebuildPlan {
-    // Snapshot inputs for rebuild (stable while replay runs)
-    std::vector<Input> imus;
-    // Where we are in the IMU stream (time-ordered)
-    // index of first imu with t > ctx.t  (next event)
-    size_t imu_it_next = 0;
-
-    // held input for current interval
-    // Safety: This should point into plan.imus only
-    Input const* u_zoh = nullptr;
-
-    std::vector<Measurement> meas;
-
-    // Next measurement to replay
-    size_t meas_idx = 0;
-
-    double last_meas_applied_t = -std::numeric_limits<double>::infinity();
-
-    // Rebuilt checkpoints
-    Checkpoint<Context> new_ckpts = {.period = 0.02};
-
-    Context ctx;  // current in-progress context during replay
-
-    double target_head_t = 0.0;
-  };
-  std::optional<RebuildPlan> rebuild_;
-  std::optional<double> late_meas_trigger_t_;
-
- public:
   void start() {
-    prio = post;
-    ckpts_.setSingle(post);
-    thread = std::jthread([this](std::stop_token stop) { process(stop); });
+    prio_ = post_;
+    ckpts_.setSingle(post_);
+    thread_ = std::jthread([this](std::stop_token stop) { process(stop); });
+  }
+
+  void reset(const Context& post0 = Context{.t = 0.0}) {
+    std::scoped_lock lock(mtx_);
+    meas_hist_.clear();
+    imus_.clear();
+    ckpts_.setSingle(post0);
+    post_ = post0;
+    prio_ = post0;
+
+    processed_up_to_t_ = -std::numeric_limits<double>::infinity();
+    meas_next_idx_ = 0;
+    rebuild_.reset();
+    late_meas_trigger_t_.reset();
   }
 
   void push_imu(Input imu) {
-    std::scoped_lock lock(mtx);
+    std::scoped_lock lock(mtx_);
 
     imus_.insert(upper_bound(imus_, imu.t, {}, &Input::t), imu);
-    cv.notify_all();
+    cv_.notify_all();
   }
 
   void push_pose(Measurement meas) {
-    std::scoped_lock lock(mtx);
-    auto insert_pt = upper_bound(meas_hist_, meas.t, {}, &Measurement::t);
-    auto insert_idx = std::distance(meas_hist_.begin(), insert_pt);
+    std::scoped_lock lock(mtx_);
+    const auto insert_pt = upper_bound(meas_hist_, meas.t, {}, &Measurement::t);
+    const auto insert_idx = std::distance(meas_hist_.begin(), insert_pt);
     meas_hist_.insert(insert_pt, meas);
 
-    if (std::cmp_less_equal(insert_idx, meas_next_idx_)) {
+    // If the new measurement is inserted strictly *before* the next-to-process
+    // index, we must advance meas_next_idx_ to keep it pointing at the same
+    // logical "next unprocessed" element.
+    //
+    // IMPORTANT: use strict `<` (not `<=`).
+    // - If insert_idx == meas_next_idx_, the newly inserted measurement is
+    //   exactly the next one to process and must NOT be skipped.
+    // - Using `<=` would increment meas_next_idx_ too eagerly and cause
+    //   first-arrival or coincident measurements to be silently ignored.
+    if (std::cmp_less(insert_idx, meas_next_idx_)) {
       ++meas_next_idx_;
     }
-    if (meas.t < processed_up_to_t_) {
-      // We don't start rebuild here (keep push fast); process() will start it.
-      // But we do wake it up.
-      if (!late_meas_trigger_t_ || meas.t < late_meas_trigger_t_.value()) {
+
+    if (meas.t <= processed_up_to_t_) {
+      // If it's too old to replay, don't arm rebuild. (Still keep it in
+      // history; it'll be skipped naturally.)
+      if (!imus_.empty()) {
+        const double keep_from = imus_.back().t - max_ckpt_age_;
+        if (meas.t < keep_from) {
+          cv_.notify_all();
+          return;
+        }
+      }
+
+      if (!late_meas_trigger_t_ || meas.t < *late_meas_trigger_t_) {
         late_meas_trigger_t_ = meas.t;
       }
     }
 
-    cv.notify_all();
+    cv_.notify_all();
   }
 
   void pruneHistory(double head_t) {
@@ -207,7 +225,7 @@ class InertialOdometryDriver {
     // Prune checkpoints older than keep_from, but keep at least one
     ckpts_.eraseUntil(keep_from);
     if (ckpts_.empty()) {
-      ckpts_.setSingle(post);
+      ckpts_.setSingle(post_);
     }
 
     if (late_meas_trigger_t_ && late_meas_trigger_t_.value() < keep_from) {
@@ -260,13 +278,13 @@ class InertialOdometryDriver {
     rebuild_ = std::move(plan);
   }
 
-  Context peek(double time) {
+  Context getState(double time) {
     Context ctx;
     std::vector<Input> imus_copy;  // Vector for better cache locality; Maybe
                                    // even inplace_vector
     {
-      std::shared_lock lock(mtx);  // Reader lock here; quickly unlocked since
-      ctx = post;
+      std::shared_lock lock(mtx_);  // Reader lock here; quickly unlocked since
+      ctx = post_;
       if (imus_.empty()) {
         return ctx;
       }
@@ -317,7 +335,7 @@ class InertialOdometryDriver {
       const auto dt = next_event_t - ctx.t;
 
       // Run the KF predict equations if time has advanced
-      if (alg_.timeUpdate(ctx, *u_zoh, dt)) {
+      if (dt > 0 && alg_.timeUpdate(ctx, *u_zoh, dt)) {
         callback(std::as_const(ctx));
       }
 
@@ -345,12 +363,14 @@ class InertialOdometryDriver {
     propagateImpl(imus, ctx, target_t, [](auto&& /*swallow*/) {});
   }
 
-  void stepRebuild(int max_events) {
+  void stepRebuild() {
     // PRE: mtx held, rebuild_ engaged
     auto& plan = *rebuild_;
 
-    for (int k = 0; k < max_events; ++k) {
-      if (plan.ctx.t >= plan.target_head_t) break;
+    for (int k = 0; k < max_events_; ++k) {
+      if (plan.ctx.t >= plan.target_head_t) {
+        break;
+      }
 
       const bool have_next_imu = plan.imu_it_next < plan.imus.size();
       const double next_imu_t =
@@ -364,14 +384,15 @@ class InertialOdometryDriver {
           std::min({next_imu_t, next_meas_t, plan.target_head_t});
       const double dt = next_t - plan.ctx.t;
 
-      if (alg_.timeUpdate(plan.ctx, *plan.u_zoh, dt)) {
+      if (dt > 0 && alg_.timeUpdate(plan.ctx, *plan.u_zoh, dt)) {
         plan.new_ckpts.tryPush(plan.ctx);
       }
 
       // If we hit a measurement time, apply all measurements at this time
+
       while (plan.meas_idx < plan.meas.size() &&
              plan.meas[plan.meas_idx].t <= plan.ctx.t) {
-        assert(plan.meas[plan.meas_idx].t <= plan.ctx.t);
+        // assert(plan.meas[plan.meas_idx].t <= plan.ctx.t);
 
         alg_.measurementUpdate(plan.ctx, plan.meas[plan.meas_idx]);
         plan.last_meas_applied_t =
@@ -389,7 +410,7 @@ class InertialOdometryDriver {
 
     // Commit if done
     if (plan.ctx.t >= plan.target_head_t) {
-      post = plan.ctx;
+      post_ = plan.ctx;
       ckpts_ = std::move(plan.new_ckpts);
 
       // Update processed frontier: we have incorporated all measurements <=
@@ -403,7 +424,7 @@ class InertialOdometryDriver {
       meas_next_idx_ =
           static_cast<size_t>(std::distance(meas_hist_.begin(), it));
 
-      pruneHistory(post.t);
+      pruneHistory(post_.t);
       rebuild_.reset();
     }
   }
@@ -416,10 +437,18 @@ class InertialOdometryDriver {
     }
     const auto head_t = imus_.back().t;
     if (rebuild_) {
-      stepRebuild(/*max_events=*/200);
+      stepRebuild();
       return ProcessResult::kContinue;
     }
 
+    // If a late trigger exists but is outside the retained horizon, drop it.
+    // (Prevents pointless rebuilds from pruned history.)
+    if (late_meas_trigger_t_.has_value()) {
+      const double keep_from = head_t - max_ckpt_age_;
+      if (late_meas_trigger_t_.value() < keep_from) {
+        late_meas_trigger_t_.reset();
+      }
+    }
     // Find the earliest measurement that is < processed_up_to_t_ (late
     // arrival) Minimal trigger: if any measurement exists with t <
     // processed_up_to_t_
@@ -435,10 +464,14 @@ class InertialOdometryDriver {
       const auto& meas = meas_hist_[meas_next_idx_];
 
       if (meas.t > head_t) {
+        // Break out of loop only since we may still need to propagate to
+        // head_t below
         break;
       }
 
       if (meas.t < imus_.front().t) {
+        // This measurement is before any available IMU data, so we can't
+        // propagate and can return now
         ++meas_next_idx_;
         return ProcessResult::kContinue;
       }
@@ -446,24 +479,24 @@ class InertialOdometryDriver {
       Context seed = ckpts_.get(meas.t);
       ckpts_.eraseAfter(meas.t);
 
-      prio = seed;
-      propagateTo(imus_, prio, meas.t);
-      alg_.measurementUpdate(prio, meas);
-      ckpts_.tryPush(prio);  // checkpoint after measurement update
-      propagateTo(imus_, prio, head_t);
+      prio_ = seed;
+      propagateTo(imus_, prio_, meas.t);
+      alg_.measurementUpdate(prio_, meas);
+      ckpts_.tryPush(prio_);  // checkpoint after measurement update
+      propagateTo(imus_, prio_, head_t);
 
-      post = prio;
+      post_ = prio_;
       processed_up_to_t_ = std::max(processed_up_to_t_, meas.t);
       ++meas_next_idx_;
 
-      pruneHistory(post.t);  // Retain bounded history
+      pruneHistory(post_.t);  // Retain bounded history
     }
 
-    if (head_t > post.t) {
-      prio = post;
-      propagateTo(imus_, prio, imus_.back().t);
-      post = prio;
-      pruneHistory(post.t);
+    if (head_t > post_.t) {
+      prio_ = post_;
+      propagateTo(imus_, prio_, imus_.back().t);
+      post_ = prio_;
+      pruneHistory(post_.t);
     }
     return ProcessResult::kContinue;
   }
@@ -471,14 +504,14 @@ class InertialOdometryDriver {
   void process(std::stop_token stop) {
     auto& self = *this;
     while (!stop.stop_requested()) {
-      std::unique_lock lock(mtx);
-      cv.wait(lock, stop, [this, &stop] {
+      std::unique_lock lock(mtx_);
+      cv_.wait(lock, stop, [this, &stop] {
         return                                     // Wake conditions:
             stop.stop_requested()                  // 1. Exit if stopping
             || late_meas_trigger_t_.has_value()    // 2. Start rebuilding
             || rebuild_.has_value()                // 3. Rebuilding
             || meas_next_idx_ < meas_hist_.size()  // 4. Process measurements
-            || (!imus_.empty() && imus_.back().t > post.t);  // 5. Process IMU
+            || (!imus_.empty() && imus_.back().t > post_.t);  // 5. Process IMU
       });
       switch (processOnce()) {
         case ProcessResult::kContinue:
@@ -488,6 +521,92 @@ class InertialOdometryDriver {
       }
     }
   }
+
+  Algorithm& algorithm() { return alg_; }
+
+  const Algorithm& algorithm() const { return alg_; }
+
+  int max_events() const {
+    std::shared_lock lock(mtx_);
+    return max_events_;
+  }
+
+  bool setMaxEvents(int max_events) {
+    std::scoped_lock lock(mtx_);
+    if (max_events <= 0) {
+      return false;
+    }
+    max_events_ = max_events;
+    return true;
+  }
+
+  bool setMaxCkptAge(double max_ckpt_age) {
+    std::scoped_lock lock(mtx_);
+    if (max_ckpt_age <= 0) {
+      return false;
+    }
+    max_ckpt_age_ = max_ckpt_age;
+    return true;
+  }
+
+  double maxCkptAge() const {
+    std::shared_lock lock(mtx_);
+    return max_ckpt_age_;
+  }
+
+ private:
+  Algorithm alg_;
+
+  // Time-ordered measurement history
+  std::deque<Measurement> meas_hist_;
+
+  // measurement frontier: all prior measurements are fused into the posterior
+  double processed_up_to_t_ = -std::numeric_limits<double>::infinity();
+
+  // next measurement in meas_hist_ to be processed in normal streaming mode
+  size_t meas_next_idx_ = 0;
+
+  std::deque<Input> imus_;
+
+  Context prio_;
+  Context post_;
+
+  // time-ordered checkpoint history covering (head_t - max_age) until head_t
+  Checkpoint<Context> ckpts_;
+  double max_ckpt_age_ = 10.0;
+
+  mutable std::shared_mutex mtx_;
+  std::condition_variable_any cv_;
+  std::jthread thread_;
+
+  struct RebuildPlan {
+    // Snapshot inputs for rebuild (stable while replay runs)
+    std::vector<Input> imus;
+    // Where we are in the IMU stream (time-ordered)
+    // index of first imu with t > ctx.t  (next event)
+    size_t imu_it_next = 0;
+
+    // held input for current interval
+    // Safety: This should point into plan.imus only
+    Input const* u_zoh = nullptr;
+
+    std::vector<Measurement> meas;
+
+    // Next measurement to replay
+    size_t meas_idx = 0;
+
+    double last_meas_applied_t = -std::numeric_limits<double>::infinity();
+
+    // Rebuilt checkpoints
+    Checkpoint<Context> new_ckpts = {.period = 0.02};
+
+    Context ctx;  // current in-progress context during replay
+
+    double target_head_t = 0.0;
+  };
+  std::optional<RebuildPlan> rebuild_;
+  std::optional<double> late_meas_trigger_t_;
+  int max_events_ = 200;
 };
 
 }  // namespace eskf

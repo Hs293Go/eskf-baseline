@@ -16,9 +16,9 @@ set(PYBIND11_FINDPYTHON ON)
 
 find_package(pybind11 CONFIG REQUIRED)
 
-add_library(${SKBUILD_PROJECT_NAME}_eskf_baseline INTERFACE)
+add_library(${CMAKE_PROJECT_NAME}_eskf_baseline INTERFACE)
 target_sources(
-  ${SKBUILD_PROJECT_NAME}_eskf_baseline
+  ${CMAKE_PROJECT_NAME}_eskf_baseline
   INTERFACE FILE_SET
             HEADERS
             BASE_DIRS
@@ -26,12 +26,12 @@ target_sources(
             FILES
             include/eskf_baseline/eskf_baseline.hpp
             include/eskf_baseline/math.hpp)
-target_compile_features(${SKBUILD_PROJECT_NAME}_eskf_baseline
+target_compile_features(${CMAKE_PROJECT_NAME}_eskf_baseline
                         INTERFACE cxx_std_20)
-target_link_libraries(${SKBUILD_PROJECT_NAME}_eskf_baseline
+target_link_libraries(${CMAKE_PROJECT_NAME}_eskf_baseline
                       INTERFACE Eigen3::Eigen)
-add_library(${SKBUILD_PROJECT_NAME}::eskf_baseline ALIAS
-            ${SKBUILD_PROJECT_NAME}_eskf_baseline)
+add_library(${CMAKE_PROJECT_NAME}::eskf_baseline ALIAS
+            ${CMAKE_PROJECT_NAME}_eskf_baseline)
 
 if(DEFINED MODULE_NAME)
   pybind11_add_module(${MODULE_NAME} module/eskf_baseline.cpp)
@@ -39,7 +39,7 @@ if(DEFINED MODULE_NAME)
                              PRIVATE "PYBIND11_MODULE_NAME=${MODULE_NAME}")
   target_link_libraries(
     ${MODULE_NAME} PRIVATE pybind11::pybind11
-                           ${SKBUILD_PROJECT_NAME}::eskf_baseline)
+                           ${CMAKE_PROJECT_NAME}::eskf_baseline)
 
   install(TARGETS ${MODULE_NAME} DESTINATION .)
 else()
@@ -47,4 +47,8 @@ else()
 endif()
 
 add_executable(main main.cpp)
-target_link_libraries(main PRIVATE ${SKBUILD_PROJECT_NAME}::eskf_baseline)
+target_link_libraries(main PRIVATE ${CMAKE_PROJECT_NAME}::eskf_baseline)
+
+if(NOT DEFINED MODULE_NAME)
+  add_subdirectory(tests/cpp)
+endif()
