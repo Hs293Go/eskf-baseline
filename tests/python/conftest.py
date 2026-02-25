@@ -16,9 +16,7 @@ DtypeDevice = TypedDict("DtypeDevice", {"dtype": torch.dtype, "device": str})
 
 @pytest.fixture
 def config(dtype_device: DtypeDevice) -> eskf_baseline.Config:
-    return eskf_baseline.Config(
-        grav_vector=torch.as_tensor([0.0, 0.0, -9.81], **dtype_device)
-    )
+    return eskf_baseline.Config()
 
 
 @pytest.fixture
@@ -52,11 +50,14 @@ def operating_points(dtype_device: DtypeDevice) -> OperatingPoints:
     vs = -5 + 10 * rand(num_trials, 3)
     abiases = randn(num_trials, 3) * 0.1
     gbiases = randn(num_trials, 3) * 0.01
+    grav_vec = torch.tile(
+        torch.tensor([0.0, 0.0, 9.81], **dtype_device), (num_trials, 1)
+    )
     # Generate random valid nominal state
     accs = randn(num_trials, 3) * 0.5 + torch.tensor([0.0, 0.0, 9.81], **dtype_device)
     gyros = randn(num_trials, 3) * 0.1
 
     return (
-        list(map(eskf_baseline.NominalState, ps, qs, vs, abiases, gbiases)),
+        list(map(eskf_baseline.NominalState, ps, qs, vs, abiases, gbiases, grav_vec)),
         list(map(eskf_baseline.ImuInput, accs, gyros)),
     )

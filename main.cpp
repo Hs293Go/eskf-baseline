@@ -9,7 +9,7 @@ EnsureSymmetric(const Eigen::MatrixBase<Derived>& m) {
   return (m + m.transpose()) / 2;
 }
 
-using Covariance = Eigen::Matrix<double, 15, 15>;
+using Covariance = Eigen::Matrix<double, 18, 18>;
 
 // TODO
 
@@ -46,11 +46,11 @@ class KalmanFilter {
   void measurementUpdate(Context& ctx, const Measurement& meas) const {
     const Eigen::Vector<double, 6> y =
         meas.data.boxminus(eskf::PoseObservation(ctx.x));
-    const Eigen::Matrix<double, 6, 15> H = eskf::PoseObservationJacobian(ctx.x);
+    const Eigen::Matrix<double, 6, 18> H = eskf::PoseObservationJacobian(ctx.x);
     const Eigen::Matrix<double, 6, 6> S = H * ctx.P * H.transpose() + meas.R;
 
-    const Eigen::Matrix<double, 15, 6> PHt = ctx.P * H.transpose();
-    const Eigen::Matrix<double, 15, 6> K =
+    const Eigen::Matrix<double, 18, 6> PHt = ctx.P * H.transpose();
+    const Eigen::Matrix<double, 18, 6> K =
         S.llt().solve(PHt.transpose()).transpose();
 
     Covariance i_m_km = -K * H;

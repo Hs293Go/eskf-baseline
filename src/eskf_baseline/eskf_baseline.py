@@ -235,11 +235,14 @@ def inversely_rotated_vector_by_perturbation_jacobian(
 
 
 class NominalState(NamedTuple):
+    TANGENT_DIM = 18
+
     p: torch.Tensor  # Position vector (3,)
     q: torch.Tensor  # Orientation quaternion (4,)
     v: torch.Tensor  # Velocity vector (3,)
     accel_bias: torch.Tensor  # Accelerometer bias (3,)
     gyro_bias: torch.Tensor  # Gyroscope bias (3,)
+    grav_vector: torch.Tensor  # Gravity vector (3,)
 
     def boxplus(self, delta: torch.Tensor) -> "NominalState":
         """
@@ -251,13 +254,14 @@ class NominalState(NamedTuple):
         Returns:
             NominalState: Perturbed nominal state
         """
-        dp, dth, dv, dba, dbg = torch.split(delta, 3)
+        dp, dth, dv, dba, dbg, dg = torch.split(delta, 3)
         return NominalState(
             p=self.p + dp,
             q=quaternion_product(self.q, angle_axis_to_quaternion(dth)),
             v=self.v + dv,
             accel_bias=self.accel_bias + dba,
             gyro_bias=self.gyro_bias + dbg,
+            grav_vector=self.grav_vector + dg,
         )
 
     def boxminus(self, other: "NominalState") -> torch.Tensor:
@@ -275,7 +279,9 @@ class NominalState(NamedTuple):
         dv = self.v - other.v
         dba = self.accel_bias - other.accel_bias
         dbg = self.gyro_bias - other.gyro_bias
-        return torch.concat((dp, dth, dv, dba, dbg), dim=0)
+        dg = self.grav_vector - other.grav_vector
+
+        return torch.concat((dp, dth, dv, dba, dbg, dg), dim=0)
 
 
 class ImuInput(NamedTuple):
@@ -292,9 +298,6 @@ class Noise(NamedTuple):
 
 @dataclasses.dataclass
 class Config:
-    grav_vector: torch.Tensor = dataclasses.field(
-        default_factory=lambda: torch.tensor([0.0, 0.0, -9.81], dtype=torch.float32)
-    )
     accel_noise_density: float = 0.005
     gyro_noise_density: float = 5e-5
     accel_bias_random_walk: float = 0.001
@@ -314,11 +317,11 @@ def motion(
     dt (torch.Tensor): Time step (scalar)
     config (Config): Configuration parameters
     """
-    p, q, v, accel_bias, gyro_bias = x
+    p, q, v, accel_bias, gyro_bias, grav_vector = x
     accel, gyro = u
     accel_unbiased = accel - accel_bias
     accel_world = quaternion_rotate_point(q, accel_unbiased) + torch.as_tensor(
-        config.grav_vector, dtype=p.dtype, device=p.device
+        grav_vector, dtype=p.dtype, device=p.device
     )
     delta_velocity = accel_world * dt
     gyro_unbiased = gyro - gyro_bias
@@ -330,6 +333,7 @@ def motion(
         v=v + delta_velocity,
         accel_bias=accel_bias,
         gyro_bias=gyro_bias,
+        grav_vector=grav_vector,
     )
 
 
@@ -347,12 +351,16 @@ def motion_jacobians(
     config (Config): Configuration parameters
 
     """
-    p, q, v, accel_bias, gyro_bias = x
+    p, q, v, accel_bias, gyro_bias, _ = x
     accel, gyro = u
     accel_unbiased = accel - accel_bias
     gyro_unbiased = gyro - gyro_bias
     delta_angle = gyro_unbiased * dt
-    fjac = torch.zeros((15, 15), dtype=p.dtype, device=p.device)
+    fjac = torch.zeros(
+        (NominalState.TANGENT_DIM, NominalState.TANGENT_DIM),
+        dtype=p.dtype,
+        device=p.device,
+    )
 
     eye3 = torch.eye(3, dtype=p.dtype, device=p.device)
     fjac[0:3, 0:3] = eye3
@@ -364,11 +372,17 @@ def motion_jacobians(
     fjac[6:9, 3:6] = dt * rotated_vector_by_perturbation_jacobian(q, accel_unbiased)
     fjac[6:9, 6:9] = eye3
     fjac[6:9, 9:12] = -dt * quaternion_to_rotation_matrix(q)
+    fjac[6:9, 15:18] = dt * eye3
 
     fjac[9:12, 9:12] = eye3
     fjac[12:15, 12:15] = eye3
+    fjac[15:18, 15:18] = eye3
 
-    qcov = torch.zeros((15, 15), dtype=p.dtype, device=p.device)
+    qcov = torch.zeros(
+        (NominalState.TANGENT_DIM, NominalState.TANGENT_DIM),
+        dtype=p.dtype,
+        device=p.device,
+    )
     qcov[3:6, 3:6] = (config.gyro_noise_density * dt) ** 2 * eye3
     qcov[6:9, 6:9] = (config.accel_noise_density * dt) ** 2 * eye3
     qcov[9:12, 9:12] = (config.accel_bias_random_walk * dt) ** 2 * eye3
@@ -378,6 +392,7 @@ def motion_jacobians(
 
 
 class PoseObservation(NamedTuple):
+    TANGENT_DIM = 6
     p: torch.Tensor  # Position vector (3,)
     q: torch.Tensor  # Orientation quaternion (4,)
 
@@ -427,13 +442,21 @@ def pose_observation_jacobian(x: NominalState) -> torch.Tensor:
     -------
     torch.Tensor: Jacobian of the pose observation function (7, 15)
     """
-    jac = torch.zeros((6, 15), dtype=x.p.dtype, device=x.p.device)
+    jac = torch.zeros(
+        (PoseObservation.TANGENT_DIM, NominalState.TANGENT_DIM),
+        dtype=x.p.dtype,
+        device=x.p.device,
+    )
     jac[0:3, 0:3] = torch.eye(3, dtype=x.p.dtype, device=x.p.device)
-    jac[3:6, 3:6] = torch.eye(3, dtype=x.p.dtype, device=x.p.device)
+    jac[3 : PoseObservation.TANGENT_DIM, 3 : PoseObservation.TANGENT_DIM] = torch.eye(
+        3, dtype=x.p.dtype, device=x.p.device
+    )
     return jac
 
 
 class CompassObservation(NamedTuple):
+    TANGENT_DIM = 3
+
     b: torch.Tensor  # Body-frame magnetic field vector (3,)
 
     def boxminus(self, other: "CompassObservation") -> torch.Tensor:
@@ -485,6 +508,10 @@ def compass_observation_jacobian(
     -------
     torch.Tensor: Jacobian of the compass observation function (3, 15)
     """
-    jac = torch.zeros((3, 15), dtype=x.p.dtype, device=x.p.device)
+    jac = torch.zeros(
+        (CompassObservation.TANGENT_DIM, NominalState.TANGENT_DIM),
+        dtype=x.p.dtype,
+        device=x.p.device,
+    )
     jac[:, 3:6] = inversely_rotated_vector_by_perturbation_jacobian(x.q, mag_inertial)
     return jac

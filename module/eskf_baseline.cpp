@@ -27,19 +27,22 @@ void declare_eskf_types(py::module& m, const std::string& suffix) {
   // 1. Bind Structs
   py::class_<NominalState<Scalar>>(m, ("NominalState" + suffix).c_str())
       .def(py::init([](const Eigen::Vector3<Scalar>& p,
-                       const Eigen::Vector4<Scalar>& q_vec,  // Accept Vector4
+                       const Eigen::Vector4<Scalar>& q_vec,
                        const Eigen::Vector3<Scalar>& v,
                        const Eigen::Vector3<Scalar>& accel_bias,
-                       const Eigen::Vector3<Scalar>& gyro_bias) {
+                       const Eigen::Vector3<Scalar>& gyro_bias,
+                       const Eigen::Vector3<Scalar>& grav_vector) {
              // Convert Vector4 [x, y, z, w] to Quaternion
              Eigen::Quaternion<Scalar> q(q_vec);
-             return new NominalState<Scalar>{p, q, v, accel_bias, gyro_bias};
+             return new NominalState<Scalar>{
+                 p, q, v, accel_bias, gyro_bias, grav_vector};
            }),
            "p"_a = Eigen::Vector3<Scalar>::Zero(),
            "q"_a = Eigen::Vector4<Scalar>::UnitW(),
            "v"_a = Eigen::Vector3<Scalar>::Zero(),
            "accel_bias"_a = Eigen::Vector3<Scalar>::Zero(),
-           "gyro_bias"_a = Eigen::Vector3<Scalar>::Zero())
+           "gyro_bias"_a = Eigen::Vector3<Scalar>::Zero(),
+           "grav_vector"_a = Eigen::Vector3<Scalar>{0, 0, -9.81})
       .def_readwrite("p", &NominalState<Scalar>::p)
       .def_property(
           "q", [](const NominalState<Scalar>& self) { return self.q.coeffs(); },
@@ -58,20 +61,18 @@ void declare_eskf_types(py::module& m, const std::string& suffix) {
       .def_readwrite("gyro", &ImuInput<Scalar>::gyro);
 
   py::class_<Config<Scalar>>(m, ("Config" + suffix).c_str())
-      .def(py::init<Scalar, Scalar, Scalar, Scalar, Eigen::Vector3<Scalar>>(),
+      .def(py::init<Scalar, Scalar, Scalar, Scalar>(),
            "accel_noise_density"_a = static_cast<Scalar>(0.1),
            "gyro_noise_density"_a = static_cast<Scalar>(0.01),
            "accel_bias_random_walk"_a = static_cast<Scalar>(0.001),
-           "gyro_bias_random_walk"_a = static_cast<Scalar>(0.0001),
-           "grav_vector"_a = Eigen::Vector3<Scalar>{0, 0, -9.81})
+           "gyro_bias_random_walk"_a = static_cast<Scalar>(0.0001))
       .def_readwrite("accel_noise_density",
                      &Config<Scalar>::accel_noise_density)
       .def_readwrite("gyro_noise_density", &Config<Scalar>::gyro_noise_density)
       .def_readwrite("accel_bias_random_walk",
                      &Config<Scalar>::accel_bias_random_walk)
       .def_readwrite("gyro_bias_random_walk",
-                     &Config<Scalar>::gyro_bias_random_walk)
-      .def_readwrite("grav_vector", &Config<Scalar>::grav_vector);
+                     &Config<Scalar>::gyro_bias_random_walk);
 
   py::class_<Pose<Scalar>>(m, ("Pose" + suffix).c_str())
       .def(py::init([](const Eigen::Vector3<Scalar>& position,

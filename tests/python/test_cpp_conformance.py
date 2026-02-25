@@ -25,7 +25,7 @@ def cpp_operating_points(operating_points: OperatingPoints):
 
 @pytest.fixture
 def cpp_config(config: eskf_baseline.Config) -> cpp.Config:
-    return cpp.Config(grav_vector=config.grav_vector)
+    return cpp.Config()
 
 
 def test_motion_model_cpp_conformance(
@@ -69,8 +69,9 @@ def test_pose_observation_model_cpp_conformance(
 def test_compass_observation_model_cpp_conformance(
     dtype_device, config, operating_points, cpp_operating_points
 ):
+    grav_vector = torch.tensor([0.0, 0.0, 9.81], **dtype_device)
     b = torch.tensor([0.2, 0.3, 0.4], **dtype_device)  # Example magnetic field vector
-    b -= b.dot(config.grav_vector) / config.grav_vector.norm() ** 2 * config.grav_vector
+    b -= b.dot(grav_vector) / grav_vector.norm() ** 2 * grav_vector
 
     for x, _, xc, _ in zip(*operating_points, *cpp_operating_points):
         z = torch.compile(eskf_baseline.compass_observation)(x, b)

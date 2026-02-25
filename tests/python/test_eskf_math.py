@@ -27,7 +27,10 @@ def test_motion_jacobian(
 
     num_vecs = 10
 
-    vs = torch.randn((len(operating_points[0]), num_vecs, 15), **dtype_device)
+    vs = torch.randn(
+        (len(operating_points[0]), num_vecs, eskf_baseline.NominalState.TANGENT_DIM),
+        **dtype_device,
+    )
 
     for x, u, vb in zip(*operating_points, vs):
         # 1. Get hand-derived Jacobian
@@ -36,7 +39,9 @@ def test_motion_jacobian(
         )
 
         # 2. Get AutoDiff Jacobian evaluated at exactly zero error
-        delta_x_zero = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+        delta_x_zero = torch.zeros(
+            eskf_baseline.NominalState.TANGENT_DIM, dtype=x.p.dtype, device=x.p.device
+        )
 
         # jacrev with respect to argument 0 (delta_x)
         fjac_ad = torch.compile(torch.func.jacrev(error_dynamics_wrapper, argnums=0))(
@@ -45,7 +50,9 @@ def test_motion_jacobian(
 
         torch.testing.assert_close(fjac_hand, fjac_ad, rtol=1e-4, atol=1e-4)
 
-        delta0 = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+        delta0 = torch.zeros(
+            eskf_baseline.NominalState.TANGENT_DIM, dtype=x.p.dtype, device=x.p.device
+        )
 
         # Function of delta only (so jvp sees a single input)
         def g(delta: torch.Tensor) -> torch.Tensor:
@@ -77,14 +84,19 @@ def test_pose_observation_jacobian(
     dtype_device: DtypeDevice,
 ) -> None:
     num_vecs = 10
-    vs = torch.randn((len(operating_points[0]), num_vecs, 15), **dtype_device)
+    vs = torch.randn(
+        (len(operating_points[0]), num_vecs, eskf_baseline.NominalState.TANGENT_DIM),
+        **dtype_device,
+    )
 
     for x, _, vb in zip(*operating_points, vs):
         # 1. Get hand-derived Jacobian
         obs_jac_hand = torch.compile(eskf_baseline.pose_observation_jacobian)(x)
 
         # 2. Get AutoDiff Jacobian evaluated at exactly zero error
-        delta_x_zero = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+        delta_x_zero = torch.zeros(
+            eskf_baseline.NominalState.TANGENT_DIM, dtype=x.p.dtype, device=x.p.device
+        )
 
         # jacrev with respect to argument 0 (delta_x)
         obs_jac_ad = torch.compile(
@@ -93,7 +105,9 @@ def test_pose_observation_jacobian(
 
         torch.testing.assert_close(obs_jac_hand, obs_jac_ad, rtol=1e-4, atol=1e-4)
 
-        delta0 = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+        delta0 = torch.zeros(
+            eskf_baseline.NominalState.TANGENT_DIM, dtype=x.p.dtype, device=x.p.device
+        )
 
         # Function of delta only (so jvp sees a single input)
         def g(delta: torch.Tensor) -> torch.Tensor:
@@ -127,15 +141,23 @@ def test_compass_observation_jacobian(
     operating_points: OperatingPoints,
 ) -> None:
     b = torch.tensor([0.2, 0.3, 0.4], **dtype_device)  # Example magnetic field vector
-    b -= b.dot(config.grav_vector) / config.grav_vector.norm() ** 2 * config.grav_vector
+    grav_vector = torch.tensor(
+        [0.0, 0.0, 9.81], **dtype_device
+    )  # Example gravity vector
+    b -= b.dot(grav_vector) / grav_vector.norm() ** 2 * grav_vector
     num_vecs = 10
-    vs = torch.randn((len(operating_points[0]), num_vecs, 15), **dtype_device)
+    vs = torch.randn(
+        (len(operating_points[0]), num_vecs, eskf_baseline.NominalState.TANGENT_DIM),
+        **dtype_device,
+    )
     for x, _, vb in zip(*operating_points, vs):
         # 1. Get hand-derived Jacobian
         obs_jac_hand = torch.compile(eskf_baseline.compass_observation_jacobian)(x, b)
 
         # 2. Get AutoDiff Jacobian evaluated at exactly zero error
-        delta_x_zero = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+        delta_x_zero = torch.zeros(
+            eskf_baseline.NominalState.TANGENT_DIM, dtype=x.p.dtype, device=x.p.device
+        )
 
         # jacrev with respect to argument 0 (delta_x)
         obs_jac_ad = torch.compile(
@@ -144,7 +166,9 @@ def test_compass_observation_jacobian(
 
         torch.testing.assert_close(obs_jac_hand, obs_jac_ad, rtol=1e-4, atol=1e-4)
 
-        delta0 = torch.zeros(15, dtype=x.p.dtype, device=x.p.device)
+        delta0 = torch.zeros(
+            eskf_baseline.NominalState.TANGENT_DIM, dtype=x.p.dtype, device=x.p.device
+        )
 
         # Function of delta only (so jvp sees a single input)
         def g(delta: torch.Tensor) -> torch.Tensor:
