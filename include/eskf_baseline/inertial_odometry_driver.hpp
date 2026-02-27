@@ -115,6 +115,42 @@ class InertialOdometryDriver {
   using Context = typename Algorithm::Context;
   using Measurement = typename Algorithm::Measurement;
   using Input = typename Algorithm::Input;
+  InertialOdometryDriver() = default;
+
+  explicit InertialOdometryDriver(Algorithm alg) : alg_(std::move(alg)) {}
+
+  ~InertialOdometryDriver() { stop(); }
+
+  bool running() const {
+    std::shared_lock lock(mtx_);
+    return thread_.joinable();
+  }
+
+  void start() {
+    std::scoped_lock lock(mtx_);
+    if (thread_.joinable()) {
+      return;
+    }
+    prio_ = post_;
+    ckpts_.setSingle(post_);
+    thread_ = std::jthread([this](std::stop_token stop) { process(stop); });
+    cv_.notify_all();
+  }
+
+  void stop() {
+    {
+      std::scoped_lock lock(mtx_);
+      if (thread_.joinable()) {
+        thread_.request_stop();
+        cv_.notify_all();
+        // IMPORTANT: cannot join while holding mtx_ (deadlock risk)
+      }
+    }
+    // Join outside lock
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
 
   StalenessStatus status() const {
     std::shared_lock lock(mtx_);
@@ -138,12 +174,6 @@ class InertialOdometryDriver {
       s.trigger_age = 0.0;
     }
     return s;
-  }
-
-  void start() {
-    prio_ = post_;
-    ckpts_.setSingle(post_);
-    thread_ = std::jthread([this](std::stop_token stop) { process(stop); });
   }
 
   void reset(const Context& post0 = Context{.t = 0.0}) {
@@ -502,7 +532,6 @@ class InertialOdometryDriver {
   }
 
   void process(std::stop_token stop) {
-    auto& self = *this;
     while (!stop.stop_requested()) {
       std::unique_lock lock(mtx_);
       cv_.wait(lock, stop, [this, &stop] {

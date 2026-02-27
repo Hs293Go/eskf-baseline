@@ -1,31 +1,7 @@
 #include "eskf_baseline/inertial_odometry_driver.hpp"
+#include "fixtures.hpp"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-
-class MockFilter {
- public:
-  struct Context {
-    double t;
-  };
-
-  struct Input {
-    double t;
-    std::int64_t seq;
-  };
-
-  struct Measurement {
-    double t;
-    std::int64_t seq;
-  };
-
-  MOCK_METHOD(bool, timeUpdate, (Context & ctx, const Input& u, double dt),
-              (const));
-
-  MOCK_METHOD(void, measurementUpdate, (Context & ctx, const Measurement& meas),
-              (const));
-};
-
-using NiceMockFilter = ::testing::NiceMock<MockFilter>;
 
 using testing::_;
 using testing::AtLeast;
@@ -77,10 +53,32 @@ class TestDriver : public ::testing::Test {
   eskf::InertialOdometryDriver<NiceMockFilter> driver_;
 };
 
+static void DrainUntilSteady(eskf::InertialOdometryDriver<NiceMockFilter>& d,
+                             int max_iters = 5000) {
+  for (int i = 0; i < max_iters; ++i) {
+    auto s = d.status();
+    // "steady": no rebuild, no late trigger, post caught up to head (or no IMU)
+    if (!s.rebuilding && !s.late_meas_trigger_t.has_value() &&
+        (s.imu_head_t <= s.post_t + 1e-12)) {
+      return;
+    }
+    d.processOnce();
+  }
+  FAIL() << "DrainUntilSteady hit max_iters without steady state";
+}
+
+static void PumpN(eskf::InertialOdometryDriver<NiceMockFilter>& d, int n) {
+  for (int i = 0; i < n; ++i) {
+    d.processOnce();
+  }
+}
+
 static void PumpUntil(eskf::InertialOdometryDriver<NiceMockFilter>& d,
                       std::invocable auto pred, int max_iters = 200) {
   for (int i = 0; i < max_iters; ++i) {
-    if (pred()) return;
+    if (pred()) {
+      return;
+    }
     d.processOnce();
   }
   FAIL() << __func__ << " hit max_iters without reaching condition";
