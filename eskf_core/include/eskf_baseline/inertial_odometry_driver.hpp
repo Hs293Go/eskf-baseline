@@ -96,7 +96,7 @@ struct StalenessStatus {
 
 template <typename T>
 concept HasEstimationQuantities = requires {
-  requires TimeStamped<typename T::Context>;
+  typename T::Estimate;
   requires TimeStamped<typename T::Measurement>;
   requires TimeStamped<typename T::Input>;
 };
@@ -104,17 +104,23 @@ concept HasEstimationQuantities = requires {
 template <typename T>
 concept KalmanFilterAlgorithm =
     HasEstimationQuantities<T> &&
-    requires(T self, T::Context& ctx, T::Measurement meas, T::Input u) {
-      { self.timeUpdate(ctx, u, 0.01) } -> std::convertible_to<bool>;
-      { self.measurementUpdate(ctx, meas) } -> std::same_as<void>;
+    requires(T self, T::Estimate& est, T::Measurement meas, T::Input u) {
+      { self.timeUpdate(est, u, 0.01) } -> std::convertible_to<bool>;
+      { self.measurementUpdate(est, meas) } -> std::same_as<void>;
     };
 
 template <KalmanFilterAlgorithm Algorithm>
 class InertialOdometryDriver {
  public:
-  using Context = typename Algorithm::Context;
+  using Estimate = typename Algorithm::Estimate;
   using Measurement = typename Algorithm::Measurement;
   using Input = typename Algorithm::Input;
+
+  struct Context {
+    double t;
+    typename Algorithm::Estimate est;
+  };
+
   InertialOdometryDriver() = default;
 
   explicit InertialOdometryDriver(Algorithm alg) : alg_(std::move(alg)) {}
@@ -176,13 +182,13 @@ class InertialOdometryDriver {
     return s;
   }
 
-  void reset(const Context& post0 = Context{.t = 0.0}) {
+  void reset(const Estimate& post0 = {}, double t0 = 0.0) {
     std::scoped_lock lock(mtx_);
     meas_hist_.clear();
     imus_.clear();
-    ckpts_.setSingle(post0);
-    post_ = post0;
-    prio_ = post0;
+    post_ = {.t = t0, .est = post0};
+    prio_ = {.t = t0, .est = post0};
+    ckpts_.setSingle(post_);
 
     processed_up_to_t_ = -std::numeric_limits<double>::infinity();
     meas_next_idx_ = 0;
@@ -365,7 +371,8 @@ class InertialOdometryDriver {
       const auto dt = next_event_t - ctx.t;
 
       // Run the KF predict equations if time has advanced
-      if (dt > 0 && alg_.timeUpdate(ctx, *u_zoh, dt)) {
+      if (dt > 0 && alg_.timeUpdate(ctx.est, *u_zoh, dt)) {
+        ctx.t += dt;
         callback(std::as_const(ctx));
       }
 
@@ -414,7 +421,8 @@ class InertialOdometryDriver {
           std::min({next_imu_t, next_meas_t, plan.target_head_t});
       const double dt = next_t - plan.ctx.t;
 
-      if (dt > 0 && alg_.timeUpdate(plan.ctx, *plan.u_zoh, dt)) {
+      if (dt > 0 && alg_.timeUpdate(plan.ctx.est, *plan.u_zoh, dt)) {
+        plan.ctx.t += dt;
         plan.new_ckpts.tryPush(plan.ctx);
       }
 
@@ -423,8 +431,9 @@ class InertialOdometryDriver {
       while (plan.meas_idx < plan.meas.size() &&
              plan.meas[plan.meas_idx].t <= plan.ctx.t) {
         // assert(plan.meas[plan.meas_idx].t <= plan.ctx.t);
-
-        alg_.measurementUpdate(plan.ctx, plan.meas[plan.meas_idx]);
+        const auto& meas = plan.meas[plan.meas_idx];
+        alg_.measurementUpdate(plan.ctx.est, meas);
+        plan.ctx.t = meas.t;
         plan.last_meas_applied_t =
             std::max(plan.last_meas_applied_t, plan.meas[plan.meas_idx].t);
         ++plan.meas_idx;
@@ -511,7 +520,8 @@ class InertialOdometryDriver {
 
       prio_ = seed;
       propagateTo(imus_, prio_, meas.t);
-      alg_.measurementUpdate(prio_, meas);
+      alg_.measurementUpdate(prio_.est, meas);
+      prio_.t = meas.t;
       ckpts_.tryPush(prio_);  // checkpoint after measurement update
       propagateTo(imus_, prio_, head_t);
 
