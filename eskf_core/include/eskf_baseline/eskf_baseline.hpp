@@ -12,9 +12,9 @@ struct NominalState {
   Eigen::Vector3<T> p;
   Eigen::Quaternion<T> q;
   Eigen::Vector3<T> v;
-  Eigen::Vector3<T> accel_bias;
-  Eigen::Vector3<T> gyro_bias;
-  Eigen::Vector3<T> grav_vector;
+  Eigen::Vector3<T> accel_bias = Eigen::Vector3<T>::Zero();
+  Eigen::Vector3<T> gyro_bias = Eigen::Vector3<T>::Zero();
+  Eigen::Vector3<T> grav_vector{T(0), T(0), T(-9.81)};
 
   NominalState<T> boxplus(const Eigen::Vector<T, kTangentDim>& delta) const {
     return {

@@ -1,12 +1,11 @@
 #include <cstdint>
 
+#include "eskf_baseline/inertial_odometry_driver.hpp"
 #include "gmock/gmock.h"
 
 class MockFilter {
  public:
-  struct Context {
-    double t;
-  };
+  struct Estimate {};
 
   struct Input {
     double t;
@@ -18,11 +17,11 @@ class MockFilter {
     std::int64_t seq;
   };
 
-  MOCK_METHOD(bool, timeUpdate, (Context & ctx, const Input& u, double dt),
-              (const));
+  MOCK_METHOD(eskf::BasicErrorContext, predict,
+              (Estimate & ctx, const Input& u, double dt), (const));
 
-  MOCK_METHOD(void, measurementUpdate, (Context & ctx, const Measurement& meas),
-              (const));
+  MOCK_METHOD(eskf::BasicErrorContext, correct,
+              (Estimate & ctx, const Measurement& meas), (const));
 };
 
 using NiceMockFilter = ::testing::NiceMock<MockFilter>;

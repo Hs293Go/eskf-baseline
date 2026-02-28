@@ -4,29 +4,24 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
 
-namespace eskf {
+#include "eskf_baseline/definitions.hpp"
+#include "eskf_baseline/stats.hpp"
+// Include just the headers we need to compile; run IWYU right before we ship
 
-template <typename T>
-concept TimeStamped = requires(T t) {
-  { t.t } -> std::convertible_to<double>;
-};
+namespace eskf {
 
 using std::ranges::lower_bound;
 using std::ranges::upper_bound;
-
-template <typename It>
-It prevOrBegin(It it, It begin) {
-  // Use a cleverer branchless version in the helper
-  return std::prev(it, static_cast<int>(it != begin));
-}
 
 template <TimeStamped T>
 struct Checkpoint {
@@ -44,7 +39,7 @@ struct Checkpoint {
 
   T get(double t) {
     auto it = upper_bound(ckpts_, t, {}, &T::t);  // first > t
-    return *prevOrBegin(it, ckpts_.begin());
+    return *utils::prevOrBegin(it, ckpts_.begin());
   }
 
   std::optional<T> tryGet(double t) {
@@ -61,7 +56,7 @@ struct Checkpoint {
     }
     auto keep_it = lower_bound(ckpts_, keep_from, {}, &T::t);
     // Keep one checkpoint before keep_from if it exists
-    keep_it = prevOrBegin(keep_it, ckpts_.begin());
+    keep_it = utils::prevOrBegin(keep_it, ckpts_.begin());
 
     ckpts_.erase(ckpts_.begin(), keep_it);
   }
@@ -96,7 +91,7 @@ struct StalenessStatus {
 
 template <typename T>
 concept HasEstimationQuantities = requires {
-  requires TimeStamped<typename T::Context>;
+  typename T::Estimate;
   requires TimeStamped<typename T::Measurement>;
   requires TimeStamped<typename T::Input>;
 };
@@ -104,17 +99,64 @@ concept HasEstimationQuantities = requires {
 template <typename T>
 concept KalmanFilterAlgorithm =
     HasEstimationQuantities<T> &&
-    requires(T self, T::Context& ctx, T::Measurement meas, T::Input u) {
-      { self.timeUpdate(ctx, u, 0.01) } -> std::convertible_to<bool>;
-      { self.measurementUpdate(ctx, meas) } -> std::same_as<void>;
+    requires(const T& self, T::Estimate& est, const T::Measurement& meas,
+             const T::Input& u) {
+      { self.predict(est, u, 0.01) } -> ErrorContext;
+      { self.correct(est, meas) } -> ErrorContext;
     };
 
-template <KalmanFilterAlgorithm Algorithm>
+struct EstimationOutcome {
+  EstimationOutcome() = default;
+
+  explicit EstimationOutcome(double t, Errc status = Errc::kUnknown,
+                             std::string_view message = {})
+      : t(t), status(status), message(message) {}
+
+  template <ErrorContext T>
+  EstimationOutcome(double t, T ctx)
+      : t(t), message(ctx.message()), status(ctx.errorCode()) {}
+
+  bool success() const { return IsSuccess(status); }
+  bool reject() const { return IsReject(status); }
+  bool fatal() const { return IsFatal(status); }
+
+  double t;
+  Errc status = Errc::kUnknown;
+  std::string_view message;
+};
+
+// POD option struct passable as NTTP since C++20; tested on g++-12
+struct InertialOdometryOptions {
+  // Flags if the predict/correct methods of the algorithm are atomic (i.e. they
+  // update the state in-place on success, and do not modify the state on
+  // failure).
+  bool predict_is_atomic = false;
+  bool correct_is_atomic = false;
+  std::size_t max_imu_buffer_size = 500;
+};
+
+template <KalmanFilterAlgorithm Algorithm, InertialOdometryOptions Opts = {}>
 class InertialOdometryDriver {
  public:
-  using Context = typename Algorithm::Context;
+  using Estimate = typename Algorithm::Estimate;
   using Measurement = typename Algorithm::Measurement;
   using Input = typename Algorithm::Input;
+  using PredictEC = std::remove_cvref_t<
+      std::invoke_result_t<decltype(&Algorithm::predict), const Algorithm&,
+                           Estimate&, const Input&, double>>;
+  using CorrectEC = std::remove_cvref_t<
+      std::invoke_result_t<decltype(&Algorithm::correct), const Algorithm&,
+                           Estimate&, const Measurement&>>;
+
+  static constexpr bool kPredictIsAtomic = Opts.predict_is_atomic;
+  static constexpr bool kCorrectIsAtomic = Opts.correct_is_atomic;
+  static constexpr std::size_t kMaxImuBufferSize = Opts.max_imu_buffer_size;
+
+  struct Context {
+    double t;
+    typename Algorithm::Estimate est;
+  };
+
   InertialOdometryDriver() = default;
 
   explicit InertialOdometryDriver(Algorithm alg) : alg_(std::move(alg)) {}
@@ -128,6 +170,9 @@ class InertialOdometryDriver {
 
   void start() {
     std::scoped_lock lock(mtx_);
+    if (halted_) {
+      return;  // halted is terminal until reset()
+    }
     if (thread_.joinable()) {
       return;
     }
@@ -176,18 +221,23 @@ class InertialOdometryDriver {
     return s;
   }
 
-  void reset(const Context& post0 = Context{.t = 0.0}) {
+  void reset(double t0 = 0.0, const Estimate& post0 = {}) {
     std::scoped_lock lock(mtx_);
     meas_hist_.clear();
     imus_.clear();
-    ckpts_.setSingle(post0);
-    post_ = post0;
-    prio_ = post0;
+    post_ = {.t = t0, .est = post0};
+    prio_ = {.t = t0, .est = post0};
+    ckpts_.setSingle(post_);
 
     processed_up_to_t_ = -std::numeric_limits<double>::infinity();
     meas_next_idx_ = 0;
     rebuild_.reset();
     late_meas_trigger_t_.reset();
+
+    halted_ = false;
+    halted_reason_ = Errc::kSuccess;
+    halted_t_ = -std::numeric_limits<double>::infinity();
+    halted_msg_ = {};
   }
 
   void push_imu(Input imu) {
@@ -267,7 +317,7 @@ class InertialOdometryDriver {
     // PRE: mtx is held, imus_ non-empty, ckpts_ non-empty
 
     RebuildPlan plan;
-    plan.last_meas_applied_t = processed_up_to_t_;
+    plan.last_meas_encountered_t = processed_up_to_t_;
 
     const auto head_t = imus_.back().t;
     plan.target_head_t = head_t;
@@ -280,7 +330,7 @@ class InertialOdometryDriver {
     // and include up to head_t.
 
     auto lb = lower_bound(imus_, seed.t, {}, &Input::t);
-    lb = prevOrBegin(lb, imus_.begin());
+    lb = utils::prevOrBegin(lb, imus_.begin());
 
     auto ub = upper_bound(imus_, head_t, {}, &Input::t);
     plan.imus.assign(lb, ub);
@@ -301,26 +351,33 @@ class InertialOdometryDriver {
     auto it_next = upper_bound(plan.imus, plan.ctx.t, {}, &Input::t);
     plan.imu_it_next =
         static_cast<size_t>(std::distance(plan.imus.begin(), it_next));
-    plan.u_zoh = &*prevOrBegin(it_next, plan.imus.begin());
+    plan.u_zoh = &*utils::prevOrBegin(it_next, plan.imus.begin());
 
     plan.meas_idx = 0;
 
     rebuild_ = std::move(plan);
   }
 
-  Context getState(double time) {
+  struct EstimateWithStatus {
     Context ctx;
-    std::vector<Input> imus_copy;  // Vector for better cache locality; Maybe
-                                   // even inplace_vector
+    EstimationOutcome outcome;
+  };
+
+  EstimateWithStatus getEstimate(double time) {
+    Context ctx;
+    std::array<Input, kMaxImuBufferSize> imus_buffer;
+    std::span<Input> imus_copy;
     {
       std::shared_lock lock(mtx_);  // Reader lock here; quickly unlocked since
       ctx = post_;
       if (imus_.empty()) {
-        return ctx;
+        return {.ctx = ctx,
+                .outcome = EstimationOutcome(ctx.t, Errc::kSuccess)};
       }
 
       if (time <= ctx.t) {
-        return ctx;
+        return {.ctx = ctx,
+                .outcome = EstimationOutcome(ctx.t, Errc::kSuccess)};
       }
 
       const double head_t = imus_.back().t;
@@ -328,72 +385,49 @@ class InertialOdometryDriver {
 
       auto it = lower_bound(imus_, ctx.t, {}, &Input::t);
       // include one sample before ctx.t for ZOH hold
-      it = prevOrBegin(it, imus_.begin());
+      it = utils::prevOrBegin(it, imus_.begin());
       auto sent =
           upper_bound(imus_, target_t, {}, &Input::t);  // first > target_t
       if (it == sent) {
         // No IMU samples in (ctx.t, target_t], return current state
-        return ctx;
+        return {.ctx = ctx,
+                .outcome = EstimationOutcome(ctx.t, Errc::kSuccess)};
       }
-      imus_copy.assign(it, sent);
+      const auto num_imus = static_cast<std::size_t>(std::distance(it, sent));
+
+      if (num_imus > kMaxImuBufferSize) {
+        return {.ctx = ctx,
+                .outcome = EstimationOutcome(
+                    ctx.t, Errc::kImuBufferOverflow,
+                    "getEstimate() query exceeds inline IMU scratch capacity")};
+      }
+      std::ranges::copy_n(it, num_imus, imus_buffer.begin());
+      imus_copy = {imus_buffer.data(), num_imus};
       time = target_t;
     }
-    peekTo(imus_copy, ctx, time);
-    return ctx;
-  }
 
-  template <std::ranges::bidirectional_range R, typename Callback>
-    requires std::same_as<std::ranges::range_value_t<R>, Input>
-  void propagateImpl(const R& imus, Context& ctx, double target_t,
-                     Callback&& callback) const {
-    const auto imu_begin = std::ranges::begin(imus);
-    const auto imu_end = std::ranges::end(imus);
-    if (target_t <= ctx.t || imus.empty()) {
-      return;
+    EstimationOutcome outcome;
+    // Successful if not overwritten in an error callback
+    outcome.status = Errc::kSuccess;
+    propagateImpl(
+        imus_copy, ctx, time, [](auto&& /*swallow*/) {},
+        [&outcome](const auto& ctx, auto ec) {
+          outcome = EstimationOutcome(ctx.t, ec);
+        });
+
+    if (outcome.success()) {
+      outcome.t = ctx.t;  // Sync final time in case of success
     }
-    // Locate the first IMU sample with t > ctx.t.
-    auto it = upper_bound(imus, ctx.t, {}, &Input::t);
-
-    const auto* u_zoh = &*prevOrBegin(it, imu_begin);
-
-    // Propagate in chunks between IMU samples and the target time
-    while (ctx.t < target_t) {
-      // The next event time is either the next IMU sample or the target time,
-      // whicher is earlier
-      const auto next_event_t =
-          it != imu_end ? std::min(it->t, target_t) : target_t;
-      const auto dt = next_event_t - ctx.t;
-
-      // Run the KF predict equations if time has advanced
-      if (dt > 0 && alg_.timeUpdate(ctx, *u_zoh, dt)) {
-        callback(std::as_const(ctx));
-      }
-
-      if (it == imu_end || ctx.t == target_t) {
-        break;
-      }
-      u_zoh = &*it;
-      ++it;
-    }
+    return {.ctx = ctx, .outcome = outcome};
   }
 
-  void propagateTo(const std::deque<Input>& imus, Context& ctx,
-                   double target_t) {
-    propagateImpl(imus, ctx, target_t,
-                  [this](const auto& c) { ckpts_.tryPush(c); });
-  }
-
-  void peekTo(std::span<const Input> imus, Context& ctx,
-              double target_t) const {
-    propagateImpl(imus, ctx, target_t, [](auto&& /*swallow*/) {});
-  }
-
-  void peekTo(const std::deque<Input>& imus, Context& ctx,
-              double target_t) const {
-    propagateImpl(imus, ctx, target_t, [](auto&& /*swallow*/) {});
-  }
-
-  void stepRebuild() {
+  // Returns false if rebuild encountered a predict failure (hard stop).
+  bool stepRebuild() {
+    const auto tic = std::chrono::steady_clock::now();
+    utils::ScopeGuard guard([this, tic] {
+      const auto toc = std::chrono::steady_clock::now();
+      stats_.updateRebuildNs(toc - tic);
+    });
     // PRE: mtx held, rebuild_ engaged
     auto& plan = *rebuild_;
 
@@ -414,8 +448,19 @@ class InertialOdometryDriver {
           std::min({next_imu_t, next_meas_t, plan.target_head_t});
       const double dt = next_t - plan.ctx.t;
 
-      if (dt > 0 && alg_.timeUpdate(plan.ctx, *plan.u_zoh, dt)) {
-        plan.new_ckpts.tryPush(plan.ctx);
+      if (dt > 0) {
+        // Use the same atomicity policy as streaming
+        auto ec = predictImpl(plan.ctx, *plan.u_zoh, dt);
+        if (IsSuccess(ec.errorCode())) {
+          plan.ctx.t += dt;
+          plan.new_ckpts.tryPush(plan.ctx);
+        } else {
+          // Prediction failure implies no time advance; we stop propagation to
+          // avoid stalling. Recovery (e.g. dt splitting / reinit) is handled
+          // by higher-level policy (not implemented here).
+          updateLastPredictOutcome(plan.ctx, ec);
+          return false;
+        }
       }
 
       // If we hit a measurement time, apply all measurements at this time
@@ -423,10 +468,26 @@ class InertialOdometryDriver {
       while (plan.meas_idx < plan.meas.size() &&
              plan.meas[plan.meas_idx].t <= plan.ctx.t) {
         // assert(plan.meas[plan.meas_idx].t <= plan.ctx.t);
+        const auto& meas = plan.meas[plan.meas_idx];
 
-        alg_.measurementUpdate(plan.ctx, plan.meas[plan.meas_idx]);
-        plan.last_meas_applied_t =
-            std::max(plan.last_meas_applied_t, plan.meas[plan.meas_idx].t);
+        plan.last_meas_encountered_t =
+            std::max(plan.last_meas_encountered_t, meas.t);
+
+        auto ec = correctImpl(plan.ctx, meas);
+        updateLastCorrectOutcome(plan.ctx, ec);
+
+        // We checkpoint after *encountering* a measurement timestamp even
+        // if the update rejects/fails.
+        //
+        // Rationale:
+        // - The driver treats measurement timestamps as "handled" once
+        // encountered; we do not keep retrying the same measurement
+        // indefinitely.
+        // - Checkpoints are primarily replay seeds / time anchors, not a
+        // guarantee that fusion succeeded.
+        // - Acceptance/rejection is surfaced via last_correct_outcome_ (and
+        // future counters), not via checkpoint presence.
+        plan.ctx.t = meas.t;
         ++plan.meas_idx;
         plan.new_ckpts.tryPush(plan.ctx);
       }
@@ -446,7 +507,7 @@ class InertialOdometryDriver {
       // Update processed frontier: we have incorporated all measurements <=
       // head_t
       processed_up_to_t_ =
-          std::max(processed_up_to_t_, plan.last_meas_applied_t);
+          std::max(processed_up_to_t_, plan.last_meas_encountered_t);
 
       // Set meas_next_idx_ to first measurement with t > processed_up_to_t_
       auto it =
@@ -457,17 +518,222 @@ class InertialOdometryDriver {
       pruneHistory(post_.t);
       rebuild_.reset();
     }
+
+    return true;
   }
 
   enum class ProcessResult { kContinue, kExit };
 
+  void process(std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      std::unique_lock lock(mtx_);
+      cv_.wait(lock, stop, [this, &stop] {
+        return                                     // Wake conditions:
+            stop.stop_requested()                  // 1. Exit if stopping
+            || late_meas_trigger_t_.has_value()    // 2. Start rebuilding
+            || rebuild_.has_value()                // 3. Rebuilding
+            || meas_next_idx_ < meas_hist_.size()  // 4. Process measurements
+            || (!imus_.empty() && imus_.back().t > post_.t)  // 5. Process IMU
+            || halted_;  // 6. Halted (no more processing, but allow exit)
+      });
+
+      if (halted_) {
+        return;
+      }
+      stats_.updateProcessWakeupCount();
+
+      switch (processOnceImpl()) {
+        case ProcessResult::kContinue:
+          break;  // Break from switch and continue loop
+        case ProcessResult::kExit:
+          return;
+      }
+    }
+  }
+
   ProcessResult processOnce() {
+    std::scoped_lock lock(mtx_);
+    return processOnceImpl();
+  }
+
+  Algorithm& algorithm() { return alg_; }
+
+  const Algorithm& algorithm() const { return alg_; }
+
+  int max_events() const {
+    std::shared_lock lock(mtx_);
+    return max_events_;
+  }
+
+  bool setMaxEvents(int max_events) {
+    std::scoped_lock lock(mtx_);
+    if (max_events <= 0) {
+      return false;
+    }
+    max_events_ = max_events;
+    return true;
+  }
+
+  bool setMaxCkptAge(double max_ckpt_age) {
+    std::scoped_lock lock(mtx_);
+    if (max_ckpt_age <= 0) {
+      return false;
+    }
+    max_ckpt_age_ = max_ckpt_age;
+    return true;
+  }
+
+  double maxCkptAge() const {
+    std::shared_lock lock(mtx_);
+    return max_ckpt_age_;
+  }
+
+  EstimationOutcome last_predict_outcome() const {
+    std::shared_lock lock(mtx_);
+    return last_predict_outcome_;
+  }
+
+  EstimationOutcome last_correct_outcome() const {
+    std::shared_lock lock(mtx_);
+    return last_correct_outcome_;
+  }
+
+  bool halted() const {
+    std::shared_lock lock(mtx_);
+    return halted_;
+  }
+
+  EstimationOutcome getHaltedOutcome() const {
+    std::shared_lock lock(mtx_);
+    return EstimationOutcome(halted_t_, halted_reason_, halted_msg_);
+  }
+
+  WindowStats getWindowStats() const {
+    std::shared_lock lock(mtx_);
+    return stats_.computeWindowStats();
+  }
+
+ private:
+  using Clk = std::chrono::steady_clock;
+  PredictEC predictImpl(Context& ctx, const Input& u_zoh, double dt) const {
+    const auto tic = Clk::now();
+    PredictEC ec;
+    if constexpr (kPredictIsAtomic) {
+      ec = alg_.predict(ctx.est, u_zoh, dt);
+    } else {
+      auto est_cand = ctx.est;
+      ec = alg_.predict(est_cand, u_zoh, dt);
+      if (IsSuccess(ec.errorCode())) {
+        ctx.est = std::move(est_cand);
+      }
+    }
+    const auto toc = Clk::now();
+    stats_.updatePredictNs(toc - tic);
+    stats_.updatePredictOutcome(ec.errorCode());
+    return ec;
+  }
+
+  CorrectEC correctImpl(Context& ctx, const Measurement& meas) const {
+    const auto tic = Clk::now();
+    CorrectEC ec;
+    if constexpr (kCorrectIsAtomic) {
+      ec = alg_.correct(ctx.est, meas);
+    } else {
+      auto cand_est = ctx.est;
+      ec = alg_.correct(cand_est, meas);
+      if (IsSuccess(ec.errorCode())) {
+        ctx.est = std::move(cand_est);
+      }
+    }
+    const auto toc = Clk::now();
+    stats_.updateCorrectNs(toc - tic);
+    stats_.updateCorrectOutcome(ec.errorCode());
+    return ec;
+  }
+
+  template <std::ranges::bidirectional_range R, typename OnSuccess,
+            typename OnFailure>
+    requires std::same_as<std::ranges::range_value_t<R>, Input>
+  bool propagateImpl(const R& imus, Context& ctx, double target_t,
+                     OnSuccess&& on_success, OnFailure&& on_failure) const {
+    if (target_t <= ctx.t) {
+      return true;  // already there
+    }
+    if (imus.empty()) {
+      return false;  // cannot advance
+    }
+
+    const auto imu_begin = std::ranges::begin(imus);
+    const auto imu_end = std::ranges::end(imus);
+
+    // Locate the first IMU sample with t > ctx.t.
+    auto it = upper_bound(imus, ctx.t, {}, &Input::t);
+
+    const auto* u_zoh = &*utils::prevOrBegin(it, imu_begin);
+
+    // Propagate in chunks between IMU samples and the target time
+    while (ctx.t < target_t) {
+      // The next event time is either the next IMU sample or the target time,
+      // whicher is earlier
+      const auto next_event_t =
+          it != imu_end ? std::min(it->t, target_t) : target_t;
+      const auto dt = next_event_t - ctx.t;
+
+      // Run the KF predict equations if time has advanced
+      if (dt > 0) {
+        auto ec = predictImpl(ctx, *u_zoh, dt);
+        if (IsSuccess(ec.errorCode())) {
+          ctx.t += dt;
+          on_success(std::as_const(ctx));
+        } else {
+          // Prediction failure implies no time advance; we stop propagation to
+          // avoid stalling. Recovery (e.g. dt splitting) is an outer policy.
+          on_failure(std::as_const(ctx), ec);
+          return false;  // did not reach target_t
+        }
+      }
+
+      if (it == imu_end || ctx.t == target_t) {
+        break;
+      }
+      u_zoh = &*it;
+      ++it;
+    }
+    return (ctx.t >= target_t);
+  }
+
+  bool propagateTo(const std::deque<Input>& imus, Context& ctx,
+                   double target_t) {
+    return propagateImpl(
+        imus, ctx, target_t, [this](const auto& c) { ckpts_.tryPush(c); },
+        [this](const auto&... args) { updateLastPredictOutcome(args...); });
+  }
+
+  ProcessResult processOnceImpl() {
+    const auto tic = Clk::now();
+    stats_.updateProcessIterCount();
+
+    utils::ScopeGuard guard([this, tic] {
+      const auto toc = Clk::now();
+      stats_.updateProcessNs(toc - tic);
+      stats_.recordStatsSample();
+    });
+
+    if (halted_) {
+      return ProcessResult::kExit;  // or kContinue if you prefer “no-op”
+    }
+
     if (imus_.empty()) {
       return ProcessResult::kContinue;
     }
     const auto head_t = imus_.back().t;
     if (rebuild_) {
-      stepRebuild();
+      if (!stepRebuild()) {
+        haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
+               last_predict_outcome_.message);
+        // Rebuild predict failure is fatal-for-progress
+        return ProcessResult::kExit;
+      }
       return ProcessResult::kContinue;
     }
 
@@ -510,10 +776,21 @@ class InertialOdometryDriver {
       ckpts_.eraseAfter(meas.t);
 
       prio_ = seed;
-      propagateTo(imus_, prio_, meas.t);
-      alg_.measurementUpdate(prio_, meas);
+      if (!propagateTo(imus_, prio_, meas.t)) {
+        haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
+               last_predict_outcome_.message);
+        return ProcessResult::kExit;  // Propagation error is fatal
+      }
+      CorrectEC ec = correctImpl(prio_, meas);
+      prio_.t = meas.t;
+      updateLastCorrectOutcome(prio_, ec);
+
       ckpts_.tryPush(prio_);  // checkpoint after measurement update
-      propagateTo(imus_, prio_, head_t);
+      if (!propagateTo(imus_, prio_, head_t)) {
+        haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
+               last_predict_outcome_.message);
+        return ProcessResult::kExit;  // Propagation error is fatal
+      }
 
       post_ = prio_;
       processed_up_to_t_ = std::max(processed_up_to_t_, meas.t);
@@ -524,72 +801,46 @@ class InertialOdometryDriver {
 
     if (head_t > post_.t) {
       prio_ = post_;
-      propagateTo(imus_, prio_, imus_.back().t);
+      if (!propagateTo(imus_, prio_, imus_.back().t)) {
+        haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
+               last_predict_outcome_.message);
+        return ProcessResult::kExit;  // Propagation error is fatal
+      }
       post_ = prio_;
       pruneHistory(post_.t);
     }
     return ProcessResult::kContinue;
   }
 
-  void process(std::stop_token stop) {
-    while (!stop.stop_requested()) {
-      std::unique_lock lock(mtx_);
-      cv_.wait(lock, stop, [this, &stop] {
-        return                                     // Wake conditions:
-            stop.stop_requested()                  // 1. Exit if stopping
-            || late_meas_trigger_t_.has_value()    // 2. Start rebuilding
-            || rebuild_.has_value()                // 3. Rebuilding
-            || meas_next_idx_ < meas_hist_.size()  // 4. Process measurements
-            || (!imus_.empty() && imus_.back().t > post_.t);  // 5. Process IMU
-      });
-      switch (processOnce()) {
-        case ProcessResult::kContinue:
-          break;  // Break from switch and continue loop
-        case ProcessResult::kExit:
-          return;
-      }
+  void updateLastPredictOutcome(const Context& ctx,
+                                const PredictEC& ec) noexcept {
+    last_predict_outcome_ = EstimationOutcome(ctx.t, ec);
+  }
+
+  void updateLastCorrectOutcome(const Context& ctx,
+                                const CorrectEC& ec) noexcept {
+    last_correct_outcome_ = EstimationOutcome(ctx.t, ec);
+  }
+
+  void haltAt(double t, Errc reason, std::string_view msg = {}) {
+    halted_ = true;
+    halted_reason_ = reason;
+    halted_t_ = t;
+    halted_msg_ = msg;
+
+    if (thread_.joinable()) {
+      thread_.request_stop();
     }
+    cv_.notify_all();
   }
 
-  Algorithm& algorithm() { return alg_; }
-
-  const Algorithm& algorithm() const { return alg_; }
-
-  int max_events() const {
-    std::shared_lock lock(mtx_);
-    return max_events_;
-  }
-
-  bool setMaxEvents(int max_events) {
-    std::scoped_lock lock(mtx_);
-    if (max_events <= 0) {
-      return false;
-    }
-    max_events_ = max_events;
-    return true;
-  }
-
-  bool setMaxCkptAge(double max_ckpt_age) {
-    std::scoped_lock lock(mtx_);
-    if (max_ckpt_age <= 0) {
-      return false;
-    }
-    max_ckpt_age_ = max_ckpt_age;
-    return true;
-  }
-
-  double maxCkptAge() const {
-    std::shared_lock lock(mtx_);
-    return max_ckpt_age_;
-  }
-
- private:
   Algorithm alg_;
 
   // Time-ordered measurement history
   std::deque<Measurement> meas_hist_;
 
-  // measurement frontier: all prior measurements are fused into the posterior
+  // processed_up_to_t_ should usually mean "handled", not "successfully
+  // applied".
   double processed_up_to_t_ = -std::numeric_limits<double>::infinity();
 
   // next measurement in meas_hist_ to be processed in normal streaming mode
@@ -624,7 +875,7 @@ class InertialOdometryDriver {
     // Next measurement to replay
     size_t meas_idx = 0;
 
-    double last_meas_applied_t = -std::numeric_limits<double>::infinity();
+    double last_meas_encountered_t = -std::numeric_limits<double>::infinity();
 
     // Rebuilt checkpoints
     Checkpoint<Context> new_ckpts = {.period = 0.02};
@@ -636,6 +887,15 @@ class InertialOdometryDriver {
   std::optional<RebuildPlan> rebuild_;
   std::optional<double> late_meas_trigger_t_;
   int max_events_ = 200;
+
+  EstimationOutcome last_predict_outcome_;
+  EstimationOutcome last_correct_outcome_;
+  bool halted_ = false;
+  Errc halted_reason_ = Errc::kSuccess;  // or kUnknown
+  double halted_t_ = -std::numeric_limits<double>::infinity();
+  std::string_view halted_msg_;
+
+  mutable StatsContainer stats_;
 };
 
 }  // namespace eskf
