@@ -13,4 +13,4 @@ target_link_libraries(eskf_node PRIVATE rclcpp::rclcpp eskf_core::eskf_core
 
 install(TARGETS eskf_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})

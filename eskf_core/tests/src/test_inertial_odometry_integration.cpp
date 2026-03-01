@@ -17,20 +17,20 @@ class TestDriverThreaded : public ::testing::Test {
   std::vector<MeasurementUpdateCall> measurement_updates_;
 
   void SetUp() override {
-    ON_CALL(driver_.algorithm(), timeUpdate)
+    ON_CALL(driver_.algorithm(), predict)
         .WillByDefault([this](auto& ctx, const auto& u, double dt) {
           {
             std::lock_guard lk(calls_mtx_);
             time_updates_.push_back({u.seq, dt});
           }
-          ctx.t += dt;
-          return true;
+          return eskf::BasicErrorContext{.ec = eskf::Errc::kSuccess};
         });
 
-    ON_CALL(driver_.algorithm(), measurementUpdate)
+    ON_CALL(driver_.algorithm(), correct)
         .WillByDefault([this](auto&, const auto& y) {
           std::lock_guard lk(calls_mtx_);
           measurement_updates_.push_back({y.seq});
+          return eskf::BasicErrorContext{.ec = eskf::Errc::kSuccess};
         });
   }
 
@@ -70,7 +70,7 @@ auto IsIdleAndCaughtUp(const eskf::StalenessStatus& s) {
 };
 
 TEST_F(TestDriverThreaded, StartStopIdempotent_NoDeadlock) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   driver_.start();
   driver_.start();  // idempotent
@@ -89,7 +89,7 @@ TEST_F(TestDriverThreaded, StartStopIdempotent_NoDeadlock) {
 }
 
 TEST_F(TestDriverThreaded, ResetWhileRunning) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.start();
 
   // Phase 1: push and wait until caught up
@@ -112,7 +112,7 @@ TEST_F(TestDriverThreaded, ResetWhileRunning) {
   clear_calls();
 
   // Reset to new epoch while worker is running
-  driver_.reset({.t = 100.0});
+  driver_.reset(100.0);
 
   // Phase 2: new data only
   driver_.push_imu({.t = 100.5, .seq = 3});
@@ -135,7 +135,7 @@ TEST_F(TestDriverThreaded, ResetWhileRunning) {
 }
 
 TEST_F(TestDriverThreaded, StopHaltsProcessing) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.start();
 
   driver_.push_imu({.t = 1.0, .seq = 1});
@@ -157,7 +157,7 @@ TEST_F(TestDriverThreaded, StopHaltsProcessing) {
 }
 
 TEST_F(TestDriverThreaded, RestartAfterStopWorks) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.start();
 
   driver_.push_imu({.t = 1.0, .seq = 1});
@@ -165,7 +165,7 @@ TEST_F(TestDriverThreaded, RestartAfterStopWorks) {
 
   driver_.stop();
 
-  driver_.reset({.t = 100.0});
+  driver_.reset(100.0);
   clear_calls();
 
   driver_.start();
@@ -185,7 +185,7 @@ TEST_F(TestDriverThreaded, RestartAfterStopWorks) {
 }
 
 TEST_F(TestDriverThreaded, ResetWakesWorker_NoHang) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.start();
 
   // Let worker block (no data).
@@ -195,7 +195,7 @@ TEST_F(TestDriverThreaded, ResetWakesWorker_NoHang) {
 
   // Reset should not hang, and should wake worker (even though it will go back
   // to waiting).
-  driver_.reset({.t = 10.0});
+  driver_.reset(10.0);
 
   // Now push data and ensure it processes from new epoch.
   driver_.push_imu({.t = 10.1, .seq = 1});
@@ -206,7 +206,7 @@ TEST_F(TestDriverThreaded, ResetWakesWorker_NoHang) {
 
 // Checks no deadlocks and monotonous increaseing time
 TEST_F(TestDriverThreaded, ConcurrentGetState) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.start();
 
   // Feed a bunch of IMUs.
@@ -222,7 +222,7 @@ TEST_F(TestDriverThreaded, ConcurrentGetState) {
       double last_t = -1e300;
       while (!st.stop_requested() && !stop_readers.load()) {
         auto s = driver_.status();
-        auto ctx = driver_.getState(s.imu_head_t);  // query at head
+        auto ctx = driver_.getEstimate(s.imu_head_t);  // query at head
         // Must never go backwards.
         EXPECT_GE(ctx.t + 1e-12, last_t);
         last_t = ctx.t;
@@ -241,7 +241,7 @@ TEST_F(TestDriverThreaded, ConcurrentGetState) {
 }
 
 TEST_F(TestDriverThreaded, StopDuringRebuild_ExitsCleanly) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.start();
 
   // IMU coverage

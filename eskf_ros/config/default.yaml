@@ -1,0 +1,8 @@
+# These defaults are actually for arise (loam) working with mid360
+eskf_node:
+  ros__parameters:
+    accelerometer_unit_is_g: true
+    pose_format_is_odometry: false
+
+    imu_topic: /livox/imu/
+    meas_topic: /laser_odometry

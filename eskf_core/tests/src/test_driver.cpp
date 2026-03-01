@@ -36,16 +36,17 @@ class TestDriver : public ::testing::Test {
   std::vector<MeasurementUpdateCall> measurement_updates;
 
   void SetUp() override {
-    ON_CALL(driver_.algorithm(), timeUpdate)
+    ON_CALL(driver_.algorithm(), predict)
         .WillByDefault([this](auto& ctx, const auto& u, double dt) {
           time_updates.push_back({u.seq, dt});
-          ctx.t += dt;
-          return true;
+          return eskf::BasicErrorContext{.ec = eskf::Errc::kSuccess};
+          ;
         });
 
-    ON_CALL(driver_.algorithm(), measurementUpdate)
+    ON_CALL(driver_.algorithm(), correct)
         .WillByDefault([this](auto& ctx, const auto& y) {
           measurement_updates.push_back({y.seq});
+          return eskf::BasicErrorContext{.ec = eskf::Errc::kSuccess};
         });
   }
 
@@ -90,35 +91,35 @@ class TestDriverGetState : public TestDriver {
 };
 
 TEST_F(TestDriver, PushDataWithoutProcessing) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
   driver_.push_imu({.t = 0.1, .seq = 1});
   driver_.push_pose({.t = 0.2, .seq = 2});
 }
 
 TEST_F(TestDriverGetState, GetStateExactlyAtPost) {
-  driver_.reset({.t = times_.front()});
+  driver_.reset(times_.front());
 
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
   const auto ctx =
-      driver_.getState(times_.front());  // time <= post.t => early return
+      driver_.getEstimate(times_.front());  // time <= post.t => early return
   EXPECT_DOUBLE_EQ(ctx.t, times_.front());
 }
 
 TEST_F(TestDriverGetState, GetStateExactlyAtImu) {
-  driver_.reset({.t = 10.0});
+  driver_.reset(10.0);
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(10.1);
+  const auto ctx = driver_.getEstimate(10.1);
   EXPECT_DOUBLE_EQ(ctx.t, 10.1);
 
   // Exactly one segment: [10.0 -> 10.1] held by seq0
@@ -128,29 +129,29 @@ TEST_F(TestDriverGetState, GetStateExactlyAtImu) {
 }
 
 TEST_F(TestDriverGetState, GetStateBetweenPostAndFirstImu) {
-  driver_.reset({.t = times_.front()});
+  driver_.reset(times_.front());
 
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
   driver_.push_imu(
       MockFilter::Input{.t = times_.back(), .seq = std::ssize(times_) - 1});
 
-  const auto ctx = driver_.getState(times_.front() + 0.2);
+  const auto ctx = driver_.getEstimate(times_.front() + 0.2);
 
   ASSERT_THAT(time_updates, IsEmpty());
   EXPECT_DOUBLE_EQ(ctx.t, times_.front());
 }
 
 TEST_F(TestDriverGetState, GetStateAfterPostAndBetweenImus) {
-  driver_.reset({.t = times_.front() + 0.05});
+  driver_.reset(times_.front() + 0.05);
   for (int i = 0; i < 2; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(times_.front() + 0.08);
+  const auto ctx = driver_.getEstimate(times_.front() + 0.08);
   EXPECT_DOUBLE_EQ(ctx.t, times_.front() + 0.08);
 
   ASSERT_THAT(time_updates, SizeIs(1));
@@ -159,28 +160,28 @@ TEST_F(TestDriverGetState, GetStateAfterPostAndBetweenImus) {
 }
 
 TEST_F(TestDriverGetState, GetStateSameTimeAsPostIgnoreImus) {
-  driver_.reset({.t = times_.front()});
+  driver_.reset(times_.front());
 
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu(MockFilter::Input{.t = times_[i], .seq = i});
   }
 
-  const auto ctx = driver_.getState(times_.front());
+  const auto ctx = driver_.getEstimate(times_.front());
   EXPECT_DOUBLE_EQ(ctx.t, times_.front());
 }
 
 TEST_F(TestDriverGetState, GetStateAfterPostAndPostBeforeAllImus) {
-  driver_.reset({.t = times_.front() - 0.03});
+  driver_.reset(times_.front() - 0.03);
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(times_.front() + 0.25);
+  const auto ctx = driver_.getEstimate(times_.front() + 0.25);
   EXPECT_DOUBLE_EQ(ctx.t, times_.front() + 0.25);
 
   ASSERT_THAT(time_updates, SizeIs(4));
@@ -195,14 +196,14 @@ TEST_F(TestDriverGetState, GetStateAfterPostAndPostBeforeAllImus) {
 }
 
 TEST_F(TestDriverGetState, GetStateAfterPostAndPostAtSomeImu) {
-  driver_.reset({.t = times_[1]});
+  driver_.reset(times_[1]);
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(times_[1] + 0.25);
+  const auto ctx = driver_.getEstimate(times_[1] + 0.25);
   EXPECT_DOUBLE_EQ(ctx.t, times_[1] + 0.25);
 
   ASSERT_THAT(time_updates, SizeIs(3));
@@ -215,14 +216,14 @@ TEST_F(TestDriverGetState, GetStateAfterPostAndPostAtSomeImu) {
 }
 
 TEST_F(TestDriverGetState, GetStateAfterPostAndPostAfterSomeImus) {
-  driver_.reset({.t = times_[1]});
+  driver_.reset(times_[1]);
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(times_.front() + 0.25);
+  const auto ctx = driver_.getEstimate(times_.front() + 0.25);
   EXPECT_DOUBLE_EQ(ctx.t, times_.front() + 0.25);
 
   ASSERT_THAT(time_updates, SizeIs(2));
@@ -233,24 +234,24 @@ TEST_F(TestDriverGetState, GetStateAfterPostAndPostAfterSomeImus) {
 }
 
 TEST_F(TestDriverGetState, GetStateAfterPostAndPostAfterAllImus) {
-  driver_.reset({.t = times_.back()});
+  driver_.reset(times_.back());
 
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu(MockFilter::Input{.t = times_[i], .seq = i});
   }
-  const auto ctx = driver_.getState(times_.back() + 0.1);
+  const auto ctx = driver_.getEstimate(times_.back() + 0.1);
   EXPECT_DOUBLE_EQ(ctx.t, times_.back());
 }
 
 TEST_F(TestDriverGetState, GetStateAtLastImu) {
-  driver_.reset({.t = times_.front()});
+  driver_.reset(times_.front());
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  const auto ctx = driver_.getState(times_.back());
+  const auto ctx = driver_.getEstimate(times_.back());
   ASSERT_THAT(time_updates, SizeIs(4));
   EXPECT_DOUBLE_EQ(ctx.t, times_.back());
   EXPECT_EQ(time_updates[0].seq, 0);
@@ -265,14 +266,14 @@ TEST_F(TestDriverGetState, GetStateAtLastImu) {
 }
 
 TEST_F(TestDriverGetState, GetStateAtLastImuPostBetweenImus) {
-  driver_.reset({.t = 10.05});
+  driver_.reset(10.05);
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(10.4);
+  const auto ctx = driver_.getEstimate(10.4);
   EXPECT_DOUBLE_EQ(ctx.t, 10.4);
 
   // Segments:
@@ -292,14 +293,14 @@ TEST_F(TestDriverGetState, GetStateAtLastImuPostBetweenImus) {
 }
 
 TEST_F(TestDriverGetState, GetStateAfterAllImusAndPostBeforeAllImus) {
-  driver_.reset({.t = times_.front()});
+  driver_.reset(times_.front());
   for (int i = 0; i < 5; ++i) {
     driver_.push_imu({.t = times_[i], .seq = i});
   }
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(times_.back() + 0.1);
+  const auto ctx = driver_.getEstimate(times_.back() + 0.1);
   EXPECT_DOUBLE_EQ(ctx.t, times_.back());
 
   ASSERT_THAT(time_updates, SizeIs(4));
@@ -314,16 +315,16 @@ TEST_F(TestDriverGetState, GetStateAfterAllImusAndPostBeforeAllImus) {
 }
 
 TEST_F(TestDriverGetState, GetStateWithDuplicateImus) {
-  driver_.reset({.t = 10.0});
+  driver_.reset(10.0);
 
   driver_.push_imu({.t = 10.0, .seq = 0});
   driver_.push_imu({.t = 10.1, .seq = 1});
   driver_.push_imu({.t = 10.1, .seq = 2});  // duplicate timestamp
   driver_.push_imu({.t = 10.2, .seq = 3});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
-  const auto ctx = driver_.getState(10.2);
+  const auto ctx = driver_.getEstimate(10.2);
   EXPECT_DOUBLE_EQ(ctx.t, 10.2);
 
   // We should have exactly two positive segments: 10.0->10.1, 10.1->10.2
@@ -349,52 +350,52 @@ class TestDriverProcess : public TestDriver {};
 
 TEST_F(TestDriver, PushOnlyImuAndProcess) {
   // Arrange
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   MockFilter::Input imu{.t = 1.0, .seq = 42};
 
   // We expect exactly one predict step to reach head_t = 1.0.
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(0);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(1);
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(1);
 
   driver_.push_imu(imu);
   driver_.processOnce();
 
   // Optional: if you have a way to inspect post.t, assert it reached 1.0
-  auto post = driver_.getState(1.0);
+  auto post = driver_.getEstimate(1.0);
   EXPECT_THAT(post.t, DoubleNear(1.0, 1e-9));
 }
 
 TEST_F(TestDriver, PushOnlyPoseAndProcess) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.push_pose({.t = 1.0, .seq = 1});
 
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
 
   driver_.processOnce();
   // still should be at post0
-  EXPECT_DOUBLE_EQ(driver_.getState(0.0).t, 0.0);
+  EXPECT_DOUBLE_EQ(driver_.getEstimate(0.0).t, 0.0);
 }
 
 TEST_F(TestDriverProcess, UpdateOnCoincidentPoseAndImu) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.push_pose({.t = 1.0, .seq = 1});
   driver_.push_imu({.t = 1.0, .seq = 42});
 
   testing::InSequence seq;
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(AtLeast(1));
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(1);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(1);
   driver_.processOnce();
 }
 
 TEST_F(TestDriverProcess, PoseWaitsUntilHeadImu) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // Pose arrives first
   driver_.push_pose({.t = 1.0, .seq = 7});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(0);
   driver_.processOnce();  // no IMU => returns early
 
   ::testing::Mock::VerifyAndClearExpectations(&driver_.algorithm());
@@ -403,20 +404,20 @@ TEST_F(TestDriverProcess, PoseWaitsUntilHeadImu) {
   driver_.push_imu({.t = 1.0, .seq = 42});
 
   // This is ok
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(1);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(1);
+  EXPECT_CALL(driver_.algorithm(), predict).Times(AtLeast(1));
   driver_.processOnce();
-  EXPECT_THAT(measurement_updates, SizeIs(1));
+  ASSERT_THAT(measurement_updates, SizeIs(1));
   EXPECT_EQ(measurement_updates[0].seq, 7);
 }
 
 TEST_F(TestDriverProcess, MeasurementBeyondHeadDoesNotApply) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   driver_.push_imu({.t = 1.0, .seq = 1});
   driver_.push_pose({.t = 1.1, .seq = 9});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct).Times(0);
   driver_.processOnce();  // should only propagate to head_t, not fuse meas
 
   ::testing::Mock::VerifyAndClearExpectations(&driver_.algorithm());
@@ -424,12 +425,12 @@ TEST_F(TestDriverProcess, MeasurementBeyondHeadDoesNotApply) {
   // Extend IMU horizon
   driver_.push_imu({.t = 1.2, .seq = 2});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(1);
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(1);
   driver_.processOnce();
 }
 
 TEST_F(TestDriverProcess, StreamingAppliesMeasurementsInTimeOrder) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMUs cover everything
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -449,7 +450,7 @@ TEST_F(TestDriverProcess, StreamingAppliesMeasurementsInTimeOrder) {
 }
 
 TEST_F(TestDriver, LateMeasurementRebuildIsIncrementalAndCommits) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMU coverage up to head_t=4.0
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -493,7 +494,7 @@ TEST_F(TestDriver, LateMeasurementRebuildIsIncrementalAndCommits) {
 
 TEST_F(TestDriverProcess,
        MixedMeasurementsOnlyApplyUpToHeadImuThenContinueLater) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMU head is 3.0 initially
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -505,8 +506,8 @@ TEST_F(TestDriverProcess,
   driver_.push_pose({.t = 2.0, .seq = 2});
   driver_.push_pose({.t = 4.0, .seq = 4});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(2);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(2);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(AtLeast(1));
 
   PumpUntil(driver_, [&] {
     auto s = driver_.status();
@@ -522,8 +523,8 @@ TEST_F(TestDriverProcess,
   // Now extend IMU horizon so the t=4.0 measurement becomes processable
   driver_.push_imu({.t = 4.0, .seq = 13});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(1);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(1);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(AtLeast(1));
 
   driver_.processOnce();
 
@@ -532,7 +533,7 @@ TEST_F(TestDriverProcess,
 }
 
 TEST_F(TestDriverProcess, CoincidentPosesAppliedInStableOrder) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMU coverage beyond t=2.0
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -543,8 +544,8 @@ TEST_F(TestDriverProcess, CoincidentPosesAppliedInStableOrder) {
   driver_.push_pose({.t = 2.0, .seq = 21});
   driver_.push_pose({.t = 2.0, .seq = 22});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(2);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(2);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(AtLeast(1));
 
   driver_.processOnce();
 
@@ -556,7 +557,7 @@ TEST_F(TestDriverProcess, CoincidentPosesAppliedInStableOrder) {
 
 TEST_F(TestDriverProcess,
        MultipleLatePosesAggregateToMinTriggerAndReplayCorrectWindow) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMU coverage up to head_t = 4.0
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -611,13 +612,13 @@ TEST_F(TestDriverProcess,
 }
 
 TEST_F(TestDriverProcess, PoseAtImuFrontTimeIsProcessable) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   driver_.push_imu({.t = 1.0, .seq = 10});  // front=head=1.0
   driver_.push_pose({.t = 1.0, .seq = 7});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(1);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(1);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(AtLeast(1));
 
   PumpUntil(driver_, [&] {
     auto s = driver_.status();
@@ -629,7 +630,7 @@ TEST_F(TestDriverProcess, PoseAtImuFrontTimeIsProcessable) {
 }
 
 TEST_F(TestDriverProcess, PoseOlderThanImuFrontIsSkippedAndNotRetried) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // Oldest available IMU is 2.0
   driver_.push_imu({.t = 2.0, .seq = 20});
@@ -638,8 +639,8 @@ TEST_F(TestDriverProcess, PoseOlderThanImuFrontIsSkippedAndNotRetried) {
   // Measurement before IMU front => must be skipped
   driver_.push_pose({.t = 1.0, .seq = 99});
 
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(0);
-  EXPECT_CALL(driver_.algorithm(), timeUpdate(_, _, _)).Times(AtLeast(1));
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(0);
+  EXPECT_CALL(driver_.algorithm(), predict(_, _, _)).Times(AtLeast(1));
 
   // First call should skip it and then still propagate to head (3.0)
   PumpUntil(driver_, [&] {
@@ -650,12 +651,12 @@ TEST_F(TestDriverProcess, PoseOlderThanImuFrontIsSkippedAndNotRetried) {
   // Now, even if we call processOnce again, the skipped measurement must not
   // reappear.
   ::testing::Mock::VerifyAndClearExpectations(&driver_.algorithm());
-  EXPECT_CALL(driver_.algorithm(), measurementUpdate(_, _)).Times(0);
+  EXPECT_CALL(driver_.algorithm(), correct(_, _)).Times(0);
   driver_.processOnce();
 }
 
 TEST_F(TestDriverProcess, LateCoincidentPoseRebuildReplaysBothInStableOrder) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMU coverage
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -692,7 +693,7 @@ TEST_F(TestDriverProcess, LateCoincidentPoseRebuildReplaysBothInStableOrder) {
 }
 
 TEST_F(TestDriverProcess, PruningClearsLateMeasTriggerWhenOutOfWindow) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // Step A: create a processed frontier so "late" is meaningful
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -729,7 +730,7 @@ TEST_F(TestDriverProcess, PruningClearsLateMeasTriggerWhenOutOfWindow) {
 }
 
 TEST_F(TestDriverProcess, PoseAtImuFrontBoundaryIsApplied) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMUs start at t=1.0
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -749,7 +750,7 @@ TEST_F(TestDriverProcess, PoseAtImuFrontBoundaryIsApplied) {
 }
 
 TEST_F(TestDriverProcess, PoseOlderThanImuFrontIsSkippedAndNeverRetried) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // IMUs start at t=1.0
   driver_.push_imu({.t = 1.0, .seq = 10});
@@ -777,7 +778,7 @@ TEST_F(TestDriverProcess, PoseOlderThanImuFrontIsSkippedAndNeverRetried) {
 }
 
 TEST_F(TestDriverProcess, PruningClearsLateMeasTriggerWhenOutsideRetention) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
 
   // Retain only the last 0.25s of history.
   driver_.setMaxCkptAge(0.25);
@@ -814,7 +815,7 @@ TEST_F(TestDriverProcess, PruningClearsLateMeasTriggerWhenOutsideRetention) {
 }
 
 TEST_F(TestDriverProcess, LateMeasurementOlderThanKeepFromIsIgnored) {
-  driver_.reset({.t = 0.0});
+  driver_.reset(0.0);
   driver_.setMaxCkptAge(0.25);
 
   driver_.push_imu({.t = 1.0, .seq = 10});
