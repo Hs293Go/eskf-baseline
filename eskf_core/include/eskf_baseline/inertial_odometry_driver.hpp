@@ -8,7 +8,6 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
-#include <span>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -16,6 +15,10 @@
 // Include just the headers we need to compile; run IWYU right before we ship
 
 namespace eskf {
+
+using std::ranges::lower_bound;
+using std::ranges::upper_bound;
+
 enum class Errc {
   kSuccess,
   kNoop,
@@ -81,9 +84,6 @@ concept TimeStamped = requires(T t) {
   { t.t } -> std::convertible_to<double>;
 };
 
-using std::ranges::lower_bound;
-using std::ranges::upper_bound;
-
 template <typename It>
 It prevOrBegin(It it, It begin) {
   // Use a cleverer branchless version in the helper
@@ -142,27 +142,223 @@ struct Checkpoint {
   bool empty() const { return ckpts_.empty(); }
 };
 
-struct Statistics {
-  // ingress
-  std::uint64_t imu_in = 0;
-  std::uint64_t meas_in = 0;
+struct Totals {
+  uint64_t predict_ok = 0;
+  uint64_t predict_fail = 0;
 
-  // process loop
-  std::uint64_t process_calls = 0;
-  std::uint64_t process_ns_total = 0;
-  std::uint64_t process_ns_max = 0;
+  uint64_t correct_ok = 0;
+  uint64_t correct_reject = 0;
+  uint64_t correct_fail = 0;  // non-success, non-reject (future-proof)
 
-  // predict
-  std::uint64_t predict_calls = 0;
-  std::uint64_t predict_fail = 0;
-  Errc last_predict_ec = Errc::kSuccess;
+  uint64_t process_wakeups = 0;
+  uint64_t process_iters = 0;
+};
 
-  // correct
-  std::uint64_t correct_calls = 0;
-  std::uint64_t correct_success = 0;
-  std::uint64_t correct_reject = 0;
-  std::uint64_t correct_fatal = 0;
-  Errc last_correct_ec = Errc::kSuccess;
+struct TimeTotals {
+  int64_t process_ns = 0;
+  int64_t predict_ns = 0;
+  int64_t correct_ns = 0;
+  int64_t rebuild_ns = 0;
+};
+
+struct StatsSample {
+  double wall_t = 0.0;  // steady-clock seconds
+  Totals totals;
+  TimeTotals time_totals;
+};
+
+struct WindowStats {
+  double window_s = 0.0;
+  double sample_age_s = 0.0;
+
+  // rates
+  double process_hz = 0.0;
+  double predict_ok_hz = 0.0;
+  double predict_fail_hz = 0.0;
+  double correct_ok_hz = 0.0;
+  double correct_reject_hz = 0.0;
+
+  // cpu fractions of wall time in window
+  double process_cpu = 0.0;
+  double predict_cpu = 0.0;
+  double correct_cpu = 0.0;
+  double rebuild_cpu = 0.0;
+
+  // mean cost
+  double mean_predict_us = 0.0;
+  double mean_correct_us = 0.0;
+  double mean_process_us = 0.0;
+};
+
+namespace {
+
+inline double steadyNowSec() {
+  using clock = std::chrono::steady_clock;
+  return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
+
+}  // namespace
+
+class StatsContainer {
+ public:
+  WindowStats computeWindowStats() const {
+    WindowStats out;
+
+    if (stats_samples_.size() < 2) {
+      return out;
+    }
+
+    const double now = steadyNowSec();
+    const double target = now - stats_window_s_;
+
+    const auto& newest = stats_samples_.back();
+
+    // find first sample with wall_t >= target
+    auto it = lower_bound(stats_samples_, target, {}, &StatsSample::wall_t);
+
+    // choose oldest sample <= target if possible
+    const StatsSample* oldest = nullptr;
+    if (it == stats_samples_.begin()) {
+      oldest = &*it;  // best we can do
+    } else if (it == stats_samples_.end()) {
+      oldest = &stats_samples_.front();  // should be rare with trimming
+    } else {
+      oldest = &*std::prev(it);
+    }
+
+    const double dt = newest.wall_t - oldest->wall_t;
+    if (dt <= 1e-9) {
+      return out;
+    }
+
+    out.window_s = dt;
+    out.sample_age_s = now - newest.wall_t;
+
+    const auto& o = oldest->totals;
+    const auto& n = newest.totals;
+
+    const auto& tot_o = oldest->time_totals;
+    const auto& tot_n = newest.time_totals;
+
+    const double dpred_ok = static_cast<double>(n.predict_ok - o.predict_ok);
+    const double dpred_fail =
+        static_cast<double>(n.predict_fail - o.predict_fail);
+    const double dcorr_ok = static_cast<double>(n.correct_ok - o.correct_ok);
+    const double dcorr_reject =
+        static_cast<double>(n.correct_reject - o.correct_reject);
+    const double dproc = static_cast<double>(n.process_iters - o.process_iters);
+
+    const auto dpred_ns =
+        static_cast<double>(tot_n.predict_ns - tot_o.predict_ns);
+    const auto dcorr_ns =
+        static_cast<double>(tot_n.correct_ns - tot_o.correct_ns);
+    const auto dproc_ns =
+        static_cast<double>(tot_n.process_ns - tot_o.process_ns);
+    const auto drbld_ns =
+        static_cast<double>(tot_n.rebuild_ns - tot_o.rebuild_ns);
+
+    out.predict_ok_hz = dpred_ok / dt;
+    out.predict_fail_hz = dpred_fail / dt;
+    out.correct_ok_hz = dcorr_ok / dt;
+    out.correct_reject_hz = dcorr_reject / dt;
+    out.process_hz = dproc / dt;
+
+    const double denom_ns = dt * 1e9;
+    out.predict_cpu = dpred_ns / denom_ns;
+    out.correct_cpu = dcorr_ns / denom_ns;
+    out.process_cpu = dproc_ns / denom_ns;
+    out.rebuild_cpu = drbld_ns / denom_ns;
+
+    const double dpred_calls = dpred_ok + dpred_fail;
+    const double dcorr_calls = dcorr_ok + dcorr_reject;  // + fail if you want
+    if (dpred_calls > 0) {
+      out.mean_predict_us = (dpred_ns / dpred_calls) / 1e3;
+    }
+    if (dcorr_calls > 0) {
+      out.mean_correct_us = (dcorr_ns / dcorr_calls) / 1e3;
+    }
+    if (dproc > 0) {
+      out.mean_process_us = (dproc_ns / dproc) / 1e3;
+    }
+
+    return out;
+  }
+
+  template <auto Mem, typename... Args>
+  void updateNs(const std::chrono::duration<Args...>& d) {
+    time_totals_.*Mem +=
+        std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+  }
+
+  template <typename... R>
+  void updatePredictNs(const std::chrono::duration<R...>& d) {
+    updateNs<&TimeTotals::predict_ns>(d);
+  }
+
+  template <typename... R>
+  void updateCorrectNs(const std::chrono::duration<R...>& d) {
+    updateNs<&TimeTotals::correct_ns>(d);
+  }
+
+  template <typename... R>
+  void updateProcessNs(const std::chrono::duration<R...>& d) {
+    updateNs<&TimeTotals::process_ns>(d);
+  }
+
+  template <typename... R>
+  void updateRebuildNs(const std::chrono::duration<R...>& d) {
+    updateNs<&TimeTotals::rebuild_ns>(d);
+  }
+
+  void updatePredictOutcome(auto ec) {
+    if (IsSuccess(ec.errorCode())) {
+      ++totals_.predict_ok;
+    } else {
+      ++totals_.predict_fail;
+    }
+  }
+
+  void updateCorrectOutcome(auto ec) {
+    if (IsSuccess(ec.errorCode())) {
+      ++totals_.correct_ok;
+    } else if (IsReject(ec.errorCode())) {
+      ++totals_.correct_reject;
+    } else {
+      ++totals_.correct_fail;
+    }
+  }
+
+  void recordStatsSample() {
+    const auto now = steadyNowSec();
+    stats_samples_.emplace_back(now, totals_, time_totals_);
+
+    const double keep_from = now - (stats_window_s_ + stats_margin_s_);
+    if (!stats_samples_.empty() && stats_samples_.front().wall_t < keep_from) {
+      stats_samples_.pop_front();
+    }
+  }
+
+  void updateProcessWakeupCount() { ++totals_.process_wakeups; }
+
+  void updateProcessIterCount() { ++totals_.process_iters; }
+
+ private:
+  double stats_window_s_ = 5.0;
+  double stats_margin_s_ = 0.5;
+
+  mutable Totals totals_;
+  mutable TimeTotals time_totals_;
+  std::deque<StatsSample> stats_samples_;
+};
+
+template <typename F>
+struct ScopeGuard {
+  ScopeGuard(F&& f) : func_(std::forward<F>(f)) {}
+
+  ~ScopeGuard() { func_(); }
+
+ private:
+  F func_;
 };
 
 struct StalenessStatus {
@@ -502,6 +698,11 @@ class InertialOdometryDriver {
 
   // Returns false if rebuild encountered a predict failure (hard stop).
   bool stepRebuild() {
+    const auto tic = std::chrono::steady_clock::now();
+    ScopeGuard guard([this, tic] {
+      const auto toc = std::chrono::steady_clock::now();
+      stats_.updateRebuildNs(toc - tic);
+    });
     // PRE: mtx held, rebuild_ engaged
     auto& plan = *rebuild_;
 
@@ -607,12 +808,14 @@ class InertialOdometryDriver {
             || late_meas_trigger_t_.has_value()    // 2. Start rebuilding
             || rebuild_.has_value()                // 3. Rebuilding
             || meas_next_idx_ < meas_hist_.size()  // 4. Process measurements
-            || (!imus_.empty() && imus_.back().t > post_.t);  // 5. Process IMU
+            || (!imus_.empty() && imus_.back().t > post_.t)  // 5. Process IMU
+            || halted_;  // 6. Halted (no more processing, but allow exit)
       });
 
       if (halted_) {
         return;
       }
+      stats_.updateProcessWakeupCount();
 
       switch (processOnceImpl()) {
         case ProcessResult::kContinue:
@@ -680,8 +883,15 @@ class InertialOdometryDriver {
     return EstimationOutcome(halted_t_, halted_reason_, halted_msg_);
   }
 
+  WindowStats getWindowStats() const {
+    std::shared_lock lock(mtx_);
+    return stats_.computeWindowStats();
+  }
+
  private:
+  using Clk = std::chrono::steady_clock;
   PredictEC predictImpl(Context& ctx, const Input& u_zoh, double dt) const {
+    const auto tic = Clk::now();
     PredictEC ec;
     if constexpr (kPredictIsAtomic) {
       ec = alg_.predict(ctx.est, u_zoh, dt);
@@ -692,10 +902,14 @@ class InertialOdometryDriver {
         ctx.est = std::move(est_cand);
       }
     }
+    const auto toc = Clk::now();
+    stats_.updatePredictNs(tic - toc);
+    stats_.updatePredictOutcome(ec);
     return ec;
   }
 
   CorrectEC correctImpl(Context& ctx, const Measurement& meas) const {
+    const auto tic = Clk::now();
     CorrectEC ec;
     if constexpr (kCorrectIsAtomic) {
       ec = alg_.correct(ctx.est, meas);
@@ -706,6 +920,9 @@ class InertialOdometryDriver {
         ctx.est = std::move(cand_est);
       }
     }
+    const auto toc = Clk::now();
+    stats_.updateCorrectNs(tic - toc);
+    stats_.updateCorrectOutcome(ec);
     return ec;
   }
 
@@ -768,6 +985,15 @@ class InertialOdometryDriver {
   }
 
   ProcessResult processOnceImpl() {
+    const auto tic = Clk::now();
+    stats_.updateProcessIterCount();
+
+    ScopeGuard guard([this, tic] {
+      const auto toc = Clk::now();
+      stats_.updateProcessNs(toc - tic);
+      stats_.recordStatsSample();
+    });
+
     if (halted_) {
       return ProcessResult::kExit;  // or kContinue if you prefer “no-op”
     }
@@ -943,6 +1169,8 @@ class InertialOdometryDriver {
   Errc halted_reason_ = Errc::kSuccess;  // or kUnknown
   double halted_t_ = -std::numeric_limits<double>::infinity();
   std::string_view halted_msg_;
+
+  mutable StatsContainer stats_;
 };
 
 }  // namespace eskf

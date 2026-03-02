@@ -225,6 +225,30 @@ class EskfNode : public rclcpp::Node {
         odom_pub_->publish(odom);
       }
     });
+    double stats_pub_hz = declare_parameter("stats_pub_hz", 1.0);
+    auto stats_period =
+        std::chrono::duration<double>(1.0 / std::max(0.1, stats_pub_hz));
+
+    stats_timer_ = create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(stats_period),
+        [this]() {
+          if (!driver_.running()) {
+            return;
+          }
+          const auto ws = driver_.getWindowStats();
+          RCLCPP_INFO_STREAM(
+              get_logger(),
+              "proc=" << ws.process_hz << " Hz, "
+                      << "pred=" << ws.predict_ok_hz << " Hz (fail "
+                      << ws.predict_fail_hz << " Hz), "
+                      << "corr=" << ws.correct_ok_hz << " Hz (rej "
+                      << ws.correct_reject_hz << " Hz), "
+                      << "cpu(proc/pred/corr/reb)=" << ws.process_cpu << "/"
+                      << ws.predict_cpu << "/" << ws.correct_cpu << "/"
+                      << ws.rebuild_cpu << ", mean(us) pred/corr/proc="
+                      << ws.mean_predict_us << "/" << ws.mean_correct_us << "/"
+                      << ws.mean_process_us);
+        });
   }
 
   void tryInitDriver(double time, const Eskf::Measurement& meas0) {
@@ -254,6 +278,7 @@ class EskfNode : public rclcpp::Node {
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   eskf::InertialOdometryDriver<Eskf> driver_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr stats_timer_;
 };
 
 int main(int argc, char* argv[]) {
