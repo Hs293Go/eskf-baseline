@@ -9,6 +9,17 @@
 #include "tf2_eigen/tf2_eigen.hpp"
 
 using eskf::Eskf;
+
+template <typename T>
+T deg2rad(T deg) noexcept {
+  return deg * std::numbers::pi_v<T> / T(180);
+}
+
+template <typename T>
+T sq(T x) noexcept {
+  return x * x;
+}
+
 class EskfNode : public rclcpp::Node {
  public:
   EskfNode() : Node("eskf_node"), diag_(this) {
@@ -17,6 +28,17 @@ class EskfNode : public rclcpp::Node {
 
     RCLCPP_INFO(get_logger(), "Accelerometer unit is %s",
                 accelerometer_unit_is_g ? "g" : "m/s^2");
+
+    eskf::Config<double> cfg;
+    cfg.accel_noise_density = declare_parameter("accel_noise_density", 1.0);
+    cfg.gyro_noise_density = declare_parameter("gyro_noise_density", 0.01);
+    if (!driver_.algorithm().setConfig(cfg)) {
+      throw std::runtime_error("Invalid ESKF config parameters");
+    }
+    RCLCPP_INFO(get_logger(),
+                "Using Eskf with accel_noise_density=%.3f and "
+                "gyro_noise_density=%.3f",
+                cfg.accel_noise_density, cfg.gyro_noise_density);
 
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
         "eskf/imu", 10,
@@ -40,6 +62,28 @@ class EskfNode : public rclcpp::Node {
     const bool pose_format_is_odometry =
         declare_parameter("pose_format_is_odometry", false);
 
+    double horz_position_meas_stddev =
+        declare_parameter("horz_position_meas_stddev", 0.1);
+    double vert_position_meas_stddev =
+        declare_parameter("vert_position_meas_stddev", 0.1);
+    double orientation_meas_stddev_deg =
+        declare_parameter("orientation_meas_stddev_deg", 5.0);
+
+    // Remember to capture this matrix by copying in the callback lambda!!!
+    rcov_.diagonal() << sq(horz_position_meas_stddev),
+        sq(horz_position_meas_stddev), sq(vert_position_meas_stddev),
+        sq(deg2rad(orientation_meas_stddev_deg)),
+        sq(deg2rad(orientation_meas_stddev_deg)),
+        sq(deg2rad(orientation_meas_stddev_deg));
+
+    RCLCPP_INFO(
+        get_logger(),
+        "Measurement noise stddev: horz_pos=%.3f m, vert_pos=%.3f m, "
+        "orientation=%.3f deg; R matrix diagonal: [%f, %f, %f, %f, %f, %f]",
+        horz_position_meas_stddev, vert_position_meas_stddev,
+        orientation_meas_stddev_deg, rcov_(0, 0), rcov_(1, 1), rcov_(2, 2),
+        rcov_(3, 3), rcov_(4, 4), rcov_(5, 5));
+
     if (pose_format_is_odometry) {
       odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
           "eskf/meas", 10,
@@ -48,6 +92,9 @@ class EskfNode : public rclcpp::Node {
             Eskf::Measurement meas = {.t = time};
             tf2::fromMsg(msg->pose.pose.position, meas.data.p);
             tf2::fromMsg(msg->pose.pose.orientation, meas.data.q);
+            frame_id_ = msg->header.frame_id;
+            meas.R = rcov_;
+
             tryInitDriver(time, meas);
             driver_.push_pose(meas);
           });
@@ -60,7 +107,7 @@ class EskfNode : public rclcpp::Node {
             tf2::fromMsg(msg->pose.position, meas.data.p);
             tf2::fromMsg(msg->pose.orientation, meas.data.q);
             frame_id_ = msg->header.frame_id;
-            meas.R = Eigen::Matrix<double, 6, 6>::Identity() * 0.01;
+            meas.R = rcov_;
 
             tryInitDriver(time, meas);
             driver_.push_pose(meas);
@@ -101,14 +148,14 @@ class EskfNode : public rclcpp::Node {
       RCLCPP_INFO(get_logger(), "Verbose diagnostics disabled");
     }
     diag_.add(
-        "eskf/driver", [this, &verbose_diagnostics, verbose_diagnostics_hz](
+        "eskf/driver", [this, verbose_diagnostics, verbose_diagnostics_hz](
                            diagnostic_updater::DiagnosticStatusWrapper& stat) {
           const auto ws = driver_.getWindowStats();
           const auto st = driver_.status();
 
           if (verbose_diagnostics && driver_.running()) {
             RCLCPP_INFO_THROTTLE(
-                get_logger(), *get_clock(), 1.0 / verbose_diagnostics_hz,
+                get_logger(), *get_clock(), 1000.0 / verbose_diagnostics_hz,
                 "proc=%.2f Hz, pred=%.2f Hz (fail %.2f Hz), corr=%.2f Hz "
                 "(reject %.2f Hz), "
                 "cpu(proc/pred/corr/reb)=%.3f/%.3f/%.3f/%.3f, mean(us) "
@@ -220,6 +267,8 @@ class EskfNode : public rclcpp::Node {
   rclcpp::TimerBase::SharedPtr timer_;
   diagnostic_updater::Updater diag_;
   rclcpp::TimerBase::SharedPtr diag_timer_;
+
+  Eigen::Matrix<double, 6, 6> rcov_ = Eigen::Matrix<double, 6, 6>::Identity();
 };
 
 int main(int argc, char* argv[]) {

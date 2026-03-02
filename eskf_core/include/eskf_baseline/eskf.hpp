@@ -35,16 +35,17 @@ class Eskf {
     Eigen::Matrix<double, 6, 6> R;
   };
 
-  eskf::Config<double> cfg_{.accel_noise_density = 1,
-                            .gyro_noise_density = 0.01};
-
   eskf::BasicErrorContext predict(Estimate& ctx, const Input& u,
                                   double dt) const;
 
   eskf::BasicErrorContext correct(Estimate& ctx, const Measurement& meas) const;
 
+  bool setConfig(const eskf::Config<double>& cfg);
+
  private:
   OutlierClassifier outlier_classifier_ = {6, 0.95, 0.99};
+  eskf::Config<double> cfg_{.accel_noise_density = 1,
+                            .gyro_noise_density = 0.01};
 };
 }  // namespace eskf
 

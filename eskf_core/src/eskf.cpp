@@ -67,4 +67,11 @@ eskf::BasicErrorContext Eskf::correct(Estimate& ctx,
 
   return {.ec = errc};
 }
+bool Eskf::setConfig(const eskf::Config<double>& cfg) {
+  if (cfg.accel_noise_density <= 0 || cfg.gyro_noise_density <= 0) {
+    return false;
+  }
+  cfg_ = cfg;
+  return true;
+}
 }  // namespace eskf
