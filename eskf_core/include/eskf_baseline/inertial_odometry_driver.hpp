@@ -387,12 +387,12 @@ class InertialOdometryDriver {
     plan.new_ckpts.setSingle(seed);
 
     // Initialize IMU ZOH state at plan.ctx.t using upper_bound on plan.imus
-    // (same semantics as your propagateImpl)
+    // (same semantics as propagateImpl)
 
     auto it_next = upper_bound(plan.imus, plan.ctx.t, {}, &Input::t);
     plan.imu_it_next =
         static_cast<size_t>(std::distance(plan.imus.begin(), it_next));
-    plan.u_zoh = &*utils::prevOrBegin(it_next, plan.imus.begin());
+    plan.u_zoh_idx = plan.imu_it_next > 0 ? plan.imu_it_next - 1 : 0;
 
     plan.meas_idx = 0;
 
@@ -491,7 +491,7 @@ class InertialOdometryDriver {
 
       if (dt > 0) {
         // Use the same atomicity policy as streaming
-        auto ec = predictImpl(plan.ctx, *plan.u_zoh, dt);
+        auto ec = predictImpl(plan.ctx, plan.imus[plan.u_zoh_idx], dt);
         if (IsSuccess(ec.errorCode())) {
           plan.ctx.t += dt;
           plan.new_ckpts.tryPush(plan.ctx);
@@ -535,7 +535,7 @@ class InertialOdometryDriver {
 
       // If we hit an IMU event time, advance ZOH hold
       if (have_next_imu && plan.imus[plan.imu_it_next].t <= plan.ctx.t) {
-        plan.u_zoh = &plan.imus[plan.imu_it_next];
+        plan.u_zoh_idx = plan.imu_it_next;
         ++plan.imu_it_next;
       }
     }
@@ -907,9 +907,8 @@ class InertialOdometryDriver {
     // index of first imu with t > ctx.t  (next event)
     size_t imu_it_next = 0;
 
-    // held input for current interval
-    // Safety: This should point into plan.imus only
-    Input const* u_zoh = nullptr;
+    // ZOH hold: index of the current IMU sample in `imus`.
+    size_t u_zoh_idx = 0;
 
     std::vector<Measurement> meas;
 
