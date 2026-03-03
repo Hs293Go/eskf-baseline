@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -450,7 +451,7 @@ class InertialOdometryDriver {
     EstimationOutcome outcome;
     // Successful if not overwritten in an error callback
     outcome.status = Errc::kSuccess;
-    propagateImpl(
+    propagateImpl<&InertialOdometryDriver::predictImpl>(
         imus_copy, ctx, time, [](auto&& /*swallow*/) {},
         [&outcome](const auto& ctx, auto ec) {
           outcome = EstimationOutcome(ctx.t, ec);
@@ -491,7 +492,8 @@ class InertialOdometryDriver {
 
       if (dt > 0) {
         // Use the same atomicity policy as streaming
-        auto ec = predictImpl(plan.ctx, plan.imus[plan.u_zoh_idx], dt);
+        auto ec =
+            predictAndRecordStats(plan.ctx, plan.imus[plan.u_zoh_idx], dt);
         if (IsSuccess(ec.errorCode())) {
           plan.ctx.t += dt;
           plan.new_ckpts.tryPush(plan.ctx);
@@ -656,8 +658,10 @@ class InertialOdometryDriver {
 
  private:
   using Clk = std::chrono::steady_clock;
+
+  // Pure KF prediction: atomicity policy only, no stats side-effects.
+  // Safe to call from any thread without holding mtx_.
   PredictEC predictImpl(Context& ctx, const Input& u_zoh, double dt) const {
-    const auto tic = Clk::now();
     PredictEC ec;
     if constexpr (kPredictIsAtomic) {
       ec = alg_.predict(ctx.est, u_zoh, dt);
@@ -668,8 +672,16 @@ class InertialOdometryDriver {
         ctx.est = std::move(est_cand);
       }
     }
-    const auto toc = Clk::now();
-    stats_.updatePredictNs(toc - tic);
+    return ec;
+  }
+
+  // Prediction with stats recording. Only call from the processing thread
+  // (i.e. while mtx_ is held exclusively), so stats_ writes are serialised.
+  PredictEC predictAndRecordStats(Context& ctx, const Input& u_zoh,
+                                  double dt) const {
+    const auto tic = Clk::now();
+    auto ec = predictImpl(ctx, u_zoh, dt);
+    stats_.updatePredictNs(Clk::now() - tic);
     stats_.updatePredictOutcome(ec.errorCode());
     return ec;
   }
@@ -692,8 +704,8 @@ class InertialOdometryDriver {
     return ec;
   }
 
-  template <std::ranges::bidirectional_range R, typename OnSuccess,
-            typename OnFailure>
+  template <auto Predictor, std::ranges::bidirectional_range R,
+            typename OnSuccess, typename OnFailure>
     requires std::same_as<std::ranges::range_value_t<R>, Input>
   bool propagateImpl(const R& imus, Context& ctx, double target_t,
                      OnSuccess&& on_success, OnFailure&& on_failure) const {
@@ -722,7 +734,7 @@ class InertialOdometryDriver {
 
       // Run the KF predict equations if time has advanced
       if (dt > 0) {
-        auto ec = predictImpl(ctx, *u_zoh, dt);
+        auto ec = std::invoke(Predictor, this, ctx, *u_zoh, dt);
         if (IsSuccess(ec.errorCode())) {
           ctx.t += dt;
           on_success(std::as_const(ctx));
@@ -741,13 +753,6 @@ class InertialOdometryDriver {
       ++it;
     }
     return (ctx.t >= target_t);
-  }
-
-  bool propagateTo(const std::deque<Input>& imus, Context& ctx,
-                   double target_t) {
-    return propagateImpl(
-        imus, ctx, target_t, [this](const auto& c) { ckpts_.tryPush(c); },
-        [this](const auto&... args) { updateLastPredictOutcome(args...); });
   }
 
   ProcessResult processOnceImpl() {
@@ -797,6 +802,13 @@ class InertialOdometryDriver {
       return ProcessResult::kContinue;
     }
 
+    const auto propagate = [this](const auto& imus, auto& ctx,
+                                  double target_t) {
+      return propagateImpl<&InertialOdometryDriver::predictAndRecordStats>(
+          imus, ctx, target_t, [this](const auto& c) { ckpts_.tryPush(c); },
+          [this](const auto&... args) { updateLastPredictOutcome(args...); });
+    };
+
     while (meas_next_idx_ < meas_hist_.size()) {
       const auto& meas = meas_hist_[meas_next_idx_];
 
@@ -817,7 +829,7 @@ class InertialOdometryDriver {
       ckpts_.eraseAfter(meas.t);
 
       prio_ = seed;
-      if (!propagateTo(imus_, prio_, meas.t)) {
+      if (!propagate(imus_, prio_, meas.t)) {
         haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
                last_predict_outcome_.message);
         return ProcessResult::kExit;  // Propagation error is fatal
@@ -827,7 +839,7 @@ class InertialOdometryDriver {
       updateLastCorrectOutcome(prio_, ec);
 
       ckpts_.tryPush(prio_);  // checkpoint after measurement update
-      if (!propagateTo(imus_, prio_, head_t)) {
+      if (!propagate(imus_, prio_, head_t)) {
         haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
                last_predict_outcome_.message);
         return ProcessResult::kExit;  // Propagation error is fatal
@@ -842,7 +854,7 @@ class InertialOdometryDriver {
 
     if (head_t > post_.t) {
       prio_ = post_;
-      if (!propagateTo(imus_, prio_, imus_.back().t)) {
+      if (!propagate(imus_, prio_, imus_.back().t)) {
         haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
                last_predict_outcome_.message);
         return ProcessResult::kExit;  // Propagation error is fatal
