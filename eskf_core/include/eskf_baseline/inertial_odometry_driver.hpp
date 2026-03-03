@@ -222,6 +222,21 @@ class InertialOdometryDriver {
   }
 
   void reset(double t0 = 0.0, const Estimate& post0 = {}) {
+    // Phase 1: drain the thread.  Must request stop and join outside the lock
+    // to avoid deadlock (the thread holds mtx_ while processing).
+    {
+      std::scoped_lock lock(mtx_);
+      if (thread_.joinable()) {
+        thread_.request_stop();
+        cv_.notify_all();
+      }
+    }
+
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+
+    // Phase 2: reinitialise all state.
     std::scoped_lock lock(mtx_);
     meas_hist_.clear();
     imus_.clear();
@@ -238,6 +253,32 @@ class InertialOdometryDriver {
     halted_reason_ = Errc::kSuccess;
     halted_t_ = -std::numeric_limits<double>::infinity();
     halted_msg_ = {};
+  }
+
+  // Resets only the estimation state while the processing thread keeps running.
+  // Clears IMU/measurement history, filter state, and all derived bookkeeping,
+  // then notifies the thread so it re-evaluates with the fresh state.
+  // PRE: the thread must be alive (running() == true). If the thread has
+  // self-halted and exited, call reset() instead.
+  void resetState(double t0 = 0.0, const Estimate& post0 = {}) {
+    std::scoped_lock lock(mtx_);
+    meas_hist_.clear();
+    imus_.clear();
+    post_ = {.t = t0, .est = post0};
+    prio_ = {.t = t0, .est = post0};
+    ckpts_.setSingle(post_);
+
+    processed_up_to_t_ = -std::numeric_limits<double>::infinity();
+    meas_next_idx_ = 0;
+    rebuild_.reset();
+    late_meas_trigger_t_.reset();
+
+    halted_ = false;
+    halted_reason_ = Errc::kSuccess;
+    halted_t_ = -std::numeric_limits<double>::infinity();
+    halted_msg_ = {};
+
+    cv_.notify_all();
   }
 
   void push_imu(Input imu) {

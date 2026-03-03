@@ -111,8 +111,8 @@ TEST_F(TestDriverThreaded, ResetWhileRunning) {
 
   clear_calls();
 
-  // Reset to new epoch while worker is running
-  driver_.reset(100.0);
+  // Reset to new epoch while worker is running (state-only; thread stays live)
+  driver_.resetState(100.0);
 
   // Phase 2: new data only
   driver_.push_imu({.t = 100.5, .seq = 3});
@@ -195,7 +195,7 @@ TEST_F(TestDriverThreaded, ResetWakesWorker_NoHang) {
 
   // Reset should not hang, and should wake worker (even though it will go back
   // to waiting).
-  driver_.reset(10.0);
+  driver_.resetState(10.0);
 
   // Now push data and ensure it processes from new epoch.
   driver_.push_imu({.t = 10.1, .seq = 1});
