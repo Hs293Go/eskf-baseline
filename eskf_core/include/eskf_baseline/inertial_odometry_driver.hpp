@@ -298,79 +298,6 @@ class InertialOdometryDriver {
     cv_.notify_all();
   }
 
-  void pruneHistory(double head_t) {
-    const double keep_from = head_t - max_ckpt_age_;
-
-    // Prune IMUs older than keep_from
-    if (!imus_.empty()) {
-      imus_.erase(imus_.begin(), lower_bound(imus_, keep_from, {}, &Input::t));
-    }
-
-    // Prune measurements older than keep_from
-    if (!meas_hist_.empty()) {
-      const auto keep_it =
-          lower_bound(meas_hist_, keep_from, {}, &Measurement::t);
-      const auto erased = std::distance(meas_hist_.begin(), keep_it);
-      meas_hist_.erase(meas_hist_.begin(), keep_it);
-      meas_next_idx_ = meas_next_idx_ > erased ? (meas_next_idx_ - erased) : 0;
-    }
-
-    // Prune checkpoints older than keep_from, but keep at least one
-    ckpts_.eraseUntil(keep_from);
-    if (ckpts_.empty()) {
-      ckpts_.setSingle(post_);
-    }
-
-    if (late_meas_trigger_t_ && late_meas_trigger_t_.value() < keep_from) {
-      late_meas_trigger_t_.reset();
-    }
-  }
-
-  void startRebuild(double trigger_t) {
-    // PRE: mtx is held, imus_ non-empty, ckpts_ non-empty
-
-    RebuildPlan plan;
-    plan.last_meas_encountered_t = processed_up_to_t_;
-
-    const auto head_t = imus_.back().t;
-    plan.target_head_t = head_t;
-
-    // Choose seed checkpoint <= trigger_t (or earliest available)
-    const auto seed = ckpts_.get(trigger_t);
-    plan.ctx = seed;
-
-    // Snapshot IMUs needed: include one sample before seed.t (for ZOH hold),
-    // and include up to head_t.
-
-    auto lb = lower_bound(imus_, seed.t, {}, &Input::t);
-    lb = utils::prevOrBegin(lb, imus_.begin());
-
-    auto ub = upper_bound(imus_, head_t, {}, &Input::t);
-    plan.imus.assign(lb, ub);
-
-    // Snapshot measurements needed: all retained measurements in [seed.t,
-    // head_t]
-
-    auto m0 = lower_bound(meas_hist_, seed.t, {}, &Measurement::t);
-    auto m1 = upper_bound(meas_hist_, head_t, {}, &Measurement::t);
-    plan.meas.assign(m0, m1);
-
-    // Initialize rebuilt checkpoints with the seed
-    plan.new_ckpts.setSingle(seed);
-
-    // Initialize IMU ZOH state at plan.ctx.t using upper_bound on plan.imus
-    // (same semantics as propagateImpl)
-
-    auto it_next = upper_bound(plan.imus, plan.ctx.t, {}, &Input::t);
-    plan.imu_it_next =
-        static_cast<size_t>(std::distance(plan.imus.begin(), it_next));
-    plan.u_zoh_idx = plan.imu_it_next > 0 ? plan.imu_it_next - 1 : 0;
-
-    plan.meas_idx = 0;
-
-    rebuild_ = std::move(plan);
-  }
-
   struct EstimateWithStatus {
     Context ctx;
     EstimationOutcome outcome;
@@ -432,108 +359,6 @@ class InertialOdometryDriver {
       outcome.t = ctx.t;  // Sync final time in case of success
     }
     return {.ctx = ctx, .outcome = outcome};
-  }
-
-  // Returns false if rebuild encountered a predict failure (hard stop).
-  bool stepRebuild() {
-    const auto tic = std::chrono::steady_clock::now();
-    utils::ScopeGuard guard([this, tic] {
-      const auto toc = std::chrono::steady_clock::now();
-      stats_.updateRebuildNs(toc - tic);
-    });
-    // PRE: mtx held, rebuild_ engaged
-    auto& plan = *rebuild_;
-
-    for (int k = 0; k < max_events_; ++k) {
-      if (plan.ctx.t >= plan.target_head_t) {
-        break;
-      }
-
-      const bool have_next_imu = plan.imu_it_next < plan.imus.size();
-      const double next_imu_t =
-          have_next_imu ? plan.imus[plan.imu_it_next].t : plan.target_head_t;
-
-      const bool have_next_meas = plan.meas_idx < plan.meas.size();
-      const double next_meas_t =
-          have_next_meas ? plan.meas[plan.meas_idx].t : plan.target_head_t;
-
-      const double next_t =
-          std::min({next_imu_t, next_meas_t, plan.target_head_t});
-      const double dt = next_t - plan.ctx.t;
-
-      if (dt > 0) {
-        // Use the same atomicity policy as streaming
-        auto ec =
-            predictAndRecordStats(plan.ctx, plan.imus[plan.u_zoh_idx], dt);
-        if (IsSuccess(ec.errorCode())) {
-          plan.ctx.t += dt;
-          plan.new_ckpts.tryPush(plan.ctx);
-        } else {
-          // Prediction failure implies no time advance; we stop propagation to
-          // avoid stalling. Recovery (e.g. dt splitting / reinit) is handled
-          // by higher-level policy (not implemented here).
-          updateLastPredictOutcome(plan.ctx, ec);
-          return false;
-        }
-      }
-
-      // If we hit a measurement time, apply all measurements at this time
-
-      while (plan.meas_idx < plan.meas.size() &&
-             plan.meas[plan.meas_idx].t <= plan.ctx.t) {
-        // assert(plan.meas[plan.meas_idx].t <= plan.ctx.t);
-        const auto& meas = plan.meas[plan.meas_idx];
-
-        plan.last_meas_encountered_t =
-            std::max(plan.last_meas_encountered_t, meas.t);
-
-        auto ec = correctImpl(plan.ctx, meas);
-        updateLastCorrectOutcome(plan.ctx, ec);
-
-        // We checkpoint after *encountering* a measurement timestamp even
-        // if the update rejects/fails.
-        //
-        // Rationale:
-        // - The driver treats measurement timestamps as "handled" once
-        // encountered; we do not keep retrying the same measurement
-        // indefinitely.
-        // - Checkpoints are primarily replay seeds / time anchors, not a
-        // guarantee that fusion succeeded.
-        // - Acceptance/rejection is surfaced via last_correct_outcome_ (and
-        // future counters), not via checkpoint presence.
-        plan.ctx.t = meas.t;
-        ++plan.meas_idx;
-        plan.new_ckpts.tryPush(plan.ctx);
-      }
-
-      // If we hit an IMU event time, advance ZOH hold
-      if (have_next_imu && plan.imus[plan.imu_it_next].t <= plan.ctx.t) {
-        plan.u_zoh_idx = plan.imu_it_next;
-        ++plan.imu_it_next;
-      }
-    }
-
-    // Commit if done
-    if (plan.ctx.t >= plan.target_head_t) {
-      post_ = plan.ctx;
-      ckpts_ = std::move(plan.new_ckpts);
-
-      // Update processed frontier: we have incorporated all measurements <=
-      // head_t
-      processed_up_to_t_ =
-          std::max(processed_up_to_t_, plan.last_meas_encountered_t);
-
-      // Set meas_next_idx_ to first measurement with t > processed_up_to_t_
-      auto it =
-          upper_bound(meas_hist_, processed_up_to_t_, {}, &Measurement::t);
-      meas_next_idx_ =
-          static_cast<size_t>(std::distance(meas_hist_.begin(), it));
-
-      pruneHistory(post_.t);
-      rebuild_.reset();
-    }
-
-    return true;
   }
 
   enum class ProcessResult { kContinue, kExit };
@@ -743,6 +568,181 @@ class InertialOdometryDriver {
       ++it;
     }
     return (ctx.t >= target_t);
+  }
+
+  // Returns false if rebuild encountered a predict failure (hard stop).
+  bool stepRebuild() {
+    const auto tic = std::chrono::steady_clock::now();
+    utils::ScopeGuard guard([this, tic] {
+      const auto toc = std::chrono::steady_clock::now();
+      stats_.updateRebuildNs(toc - tic);
+    });
+    // PRE: mtx held, rebuild_ engaged
+    auto& plan = *rebuild_;
+
+    for (int k = 0; k < max_events_; ++k) {
+      if (plan.ctx.t >= plan.target_head_t) {
+        break;
+      }
+
+      const bool have_next_imu = plan.imu_it_next < plan.imus.size();
+      const double next_imu_t =
+          have_next_imu ? plan.imus[plan.imu_it_next].t : plan.target_head_t;
+
+      const bool have_next_meas = plan.meas_idx < plan.meas.size();
+      const double next_meas_t =
+          have_next_meas ? plan.meas[plan.meas_idx].t : plan.target_head_t;
+
+      const double next_t =
+          std::min({next_imu_t, next_meas_t, plan.target_head_t});
+      const double dt = next_t - plan.ctx.t;
+
+      if (dt > 0) {
+        // Use the same atomicity policy as streaming
+        auto ec =
+            predictAndRecordStats(plan.ctx, plan.imus[plan.u_zoh_idx], dt);
+        if (IsSuccess(ec.errorCode())) {
+          plan.ctx.t += dt;
+          plan.new_ckpts.tryPush(plan.ctx);
+        } else {
+          // Prediction failure implies no time advance; we stop propagation to
+          // avoid stalling. Recovery (e.g. dt splitting / reinit) is handled
+          // by higher-level policy (not implemented here).
+          updateLastPredictOutcome(plan.ctx, ec);
+          return false;
+        }
+      }
+
+      // If we hit a measurement time, apply all measurements at this time
+
+      while (plan.meas_idx < plan.meas.size() &&
+             plan.meas[plan.meas_idx].t <= plan.ctx.t) {
+        // assert(plan.meas[plan.meas_idx].t <= plan.ctx.t);
+        const auto& meas = plan.meas[plan.meas_idx];
+
+        plan.last_meas_encountered_t =
+            std::max(plan.last_meas_encountered_t, meas.t);
+
+        auto ec = correctImpl(plan.ctx, meas);
+        updateLastCorrectOutcome(plan.ctx, ec);
+
+        // We checkpoint after *encountering* a measurement timestamp even
+        // if the update rejects/fails.
+        //
+        // Rationale:
+        // - The driver treats measurement timestamps as "handled" once
+        // encountered; we do not keep retrying the same measurement
+        // indefinitely.
+        // - Checkpoints are primarily replay seeds / time anchors, not a
+        // guarantee that fusion succeeded.
+        // - Acceptance/rejection is surfaced via last_correct_outcome_ (and
+        // future counters), not via checkpoint presence.
+        plan.ctx.t = meas.t;
+        ++plan.meas_idx;
+        plan.new_ckpts.tryPush(plan.ctx);
+      }
+
+      // If we hit an IMU event time, advance ZOH hold
+      if (have_next_imu && plan.imus[plan.imu_it_next].t <= plan.ctx.t) {
+        plan.u_zoh_idx = plan.imu_it_next;
+        ++plan.imu_it_next;
+      }
+    }
+
+    // Commit if done
+    if (plan.ctx.t >= plan.target_head_t) {
+      post_ = plan.ctx;
+      ckpts_ = std::move(plan.new_ckpts);
+
+      // Update processed frontier: we have incorporated all measurements <=
+      // head_t
+      processed_up_to_t_ =
+          std::max(processed_up_to_t_, plan.last_meas_encountered_t);
+
+      // Set meas_next_idx_ to first measurement with t > processed_up_to_t_
+      auto it =
+          upper_bound(meas_hist_, processed_up_to_t_, {}, &Measurement::t);
+      meas_next_idx_ =
+          static_cast<size_t>(std::distance(meas_hist_.begin(), it));
+
+      pruneHistory(post_.t);
+      rebuild_.reset();
+    }
+
+    return true;
+  }
+
+  void pruneHistory(double head_t) {
+    const double keep_from = head_t - max_ckpt_age_;
+
+    // Prune IMUs older than keep_from
+    if (!imus_.empty()) {
+      imus_.erase(imus_.begin(), lower_bound(imus_, keep_from, {}, &Input::t));
+    }
+
+    // Prune measurements older than keep_from
+    if (!meas_hist_.empty()) {
+      const auto keep_it =
+          lower_bound(meas_hist_, keep_from, {}, &Measurement::t);
+      const auto erased = std::distance(meas_hist_.begin(), keep_it);
+      meas_hist_.erase(meas_hist_.begin(), keep_it);
+      meas_next_idx_ = meas_next_idx_ > erased ? (meas_next_idx_ - erased) : 0;
+    }
+
+    // Prune checkpoints older than keep_from, but keep at least one
+    ckpts_.eraseUntil(keep_from);
+    if (ckpts_.empty()) {
+      ckpts_.setSingle(post_);
+    }
+
+    if (late_meas_trigger_t_ && late_meas_trigger_t_.value() < keep_from) {
+      late_meas_trigger_t_.reset();
+    }
+  }
+
+  void startRebuild(double trigger_t) {
+    // PRE: mtx is held, imus_ non-empty, ckpts_ non-empty
+
+    RebuildPlan plan;
+    plan.last_meas_encountered_t = processed_up_to_t_;
+
+    const auto head_t = imus_.back().t;
+    plan.target_head_t = head_t;
+
+    // Choose seed checkpoint <= trigger_t (or earliest available)
+    const auto seed = ckpts_.get(trigger_t);
+    plan.ctx = seed;
+
+    // Snapshot IMUs needed: include one sample before seed.t (for ZOH hold),
+    // and include up to head_t.
+
+    auto lb = lower_bound(imus_, seed.t, {}, &Input::t);
+    lb = utils::prevOrBegin(lb, imus_.begin());
+
+    auto ub = upper_bound(imus_, head_t, {}, &Input::t);
+    plan.imus.assign(lb, ub);
+
+    // Snapshot measurements needed: all retained measurements in [seed.t,
+    // head_t]
+
+    auto m0 = lower_bound(meas_hist_, seed.t, {}, &Measurement::t);
+    auto m1 = upper_bound(meas_hist_, head_t, {}, &Measurement::t);
+    plan.meas.assign(m0, m1);
+
+    // Initialize rebuilt checkpoints with the seed
+    plan.new_ckpts.setSingle(seed);
+
+    // Initialize IMU ZOH state at plan.ctx.t using upper_bound on plan.imus
+    // (same semantics as propagateImpl)
+
+    auto it_next = upper_bound(plan.imus, plan.ctx.t, {}, &Input::t);
+    plan.imu_it_next =
+        static_cast<size_t>(std::distance(plan.imus.begin(), it_next));
+    plan.u_zoh_idx = plan.imu_it_next > 0 ? plan.imu_it_next - 1 : 0;
+
+    plan.meas_idx = 0;
+
+    rebuild_ = std::move(plan);
   }
 
   ProcessResult processOnceImpl() {
