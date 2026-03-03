@@ -2,8 +2,8 @@
 #define ESKF_BASELINE_ESKF_HPP_
 
 #include "Eigen/Dense"
+#include "eskf_baseline/definitions.hpp"
 #include "eskf_baseline/eskf_baseline.hpp"
-#include "eskf_baseline/inertial_odometry_driver.hpp"
 #include "eskf_baseline/outlier_classifier.hpp"
 
 namespace eskf {
