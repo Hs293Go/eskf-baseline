@@ -239,21 +239,7 @@ class InertialOdometryDriver {
 
     // Phase 2: reinitialise all state.
     std::scoped_lock lock(mtx_);
-    meas_hist_.clear();
-    imus_.clear();
-    post_ = {.t = t0, .est = post0};
-    prio_ = {.t = t0, .est = post0};
-    ckpts_.setSingle(post_);
-
-    processed_up_to_t_ = -std::numeric_limits<double>::infinity();
-    meas_next_idx_ = 0;
-    rebuild_.reset();
-    late_meas_trigger_t_.reset();
-
-    halted_ = false;
-    halted_reason_ = Errc::kSuccess;
-    halted_t_ = -std::numeric_limits<double>::infinity();
-    halted_msg_ = {};
+    resetStateImpl(t0, post0);
   }
 
   // Resets only the estimation state while the processing thread keeps running.
@@ -263,22 +249,7 @@ class InertialOdometryDriver {
   // self-halted and exited, call reset() instead.
   void resetState(double t0 = 0.0, const Estimate& post0 = {}) {
     std::scoped_lock lock(mtx_);
-    meas_hist_.clear();
-    imus_.clear();
-    post_ = {.t = t0, .est = post0};
-    prio_ = {.t = t0, .est = post0};
-    ckpts_.setSingle(post_);
-
-    processed_up_to_t_ = -std::numeric_limits<double>::infinity();
-    meas_next_idx_ = 0;
-    rebuild_.reset();
-    late_meas_trigger_t_.reset();
-
-    halted_ = false;
-    halted_reason_ = Errc::kSuccess;
-    halted_t_ = -std::numeric_limits<double>::infinity();
-    halted_msg_ = {};
-
+    resetStateImpl(t0, post0);
     cv_.notify_all();
   }
 
@@ -658,6 +629,25 @@ class InertialOdometryDriver {
 
  private:
   using Clk = std::chrono::steady_clock;
+
+  // PRE: mtx_ is held exclusively.
+  void resetStateImpl(double t0, const Estimate& post0) {
+    meas_hist_.clear();
+    imus_.clear();
+    post_ = {.t = t0, .est = post0};
+    prio_ = {.t = t0, .est = post0};
+    ckpts_.setSingle(post_);
+
+    processed_up_to_t_ = -std::numeric_limits<double>::infinity();
+    meas_next_idx_ = 0;
+    rebuild_.reset();
+    late_meas_trigger_t_.reset();
+
+    halted_ = false;
+    halted_reason_ = Errc::kSuccess;
+    halted_t_ = -std::numeric_limits<double>::infinity();
+    halted_msg_ = {};
+  }
 
   // Pure KF prediction: atomicity policy only, no stats side-effects.
   // Safe to call from any thread without holding mtx_.
