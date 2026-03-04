@@ -65,6 +65,7 @@ NominalState<Scalar> Motion(const NominalState<Scalar>& state,
       .v = v + delta_velocity,
       .accel_bias = accel_bias,
       .gyro_bias = gyro_bias,
+      .grav_vector = grav_vector,
   };
 }
 
