@@ -192,7 +192,8 @@ class InertialOdometryDriver {
         // IMPORTANT: cannot join while holding mtx_ (deadlock risk)
       }
     }
-    // Join outside lock
+    // Serialize join so only one concurrent stop() caller ever calls join()
+    std::scoped_lock join_lock(join_mtx_);
     if (thread_.joinable()) {
       thread_.join();
     }
@@ -233,8 +234,11 @@ class InertialOdometryDriver {
       }
     }
 
-    if (thread_.joinable()) {
-      thread_.join();
+    {
+      std::scoped_lock join_lock(join_mtx_);
+      if (thread_.joinable()) {
+        thread_.join();
+      }
     }
 
     // Phase 2: reinitialise all state.
@@ -899,6 +903,7 @@ class InertialOdometryDriver {
   double max_ckpt_age_ = 10.0;
 
   mutable std::shared_mutex mtx_;
+  std::mutex join_mtx_;
   std::condition_variable_any cv_;
   std::jthread thread_;
 
