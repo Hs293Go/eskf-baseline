@@ -257,7 +257,24 @@ class InertialOdometryDriver {
   void push_imu(Input imu) {
     std::scoped_lock lock(mtx_);
 
+    // Halted is terminal until reset(); discard incoming data.
+    if (halted_) {
+      return;
+    }
+
     imus_.insert(upper_bound(imus_, imu.t, {}, &Input::t), imu);
+
+    // Hard cap: when the processing thread is not running (before start(), or
+    // between stop() and start()), pruneHistory() is never called and the queue
+    // grows without bound.  Evict the oldest entry once we exceed
+    // kMaxImuBufferSize, the same limit enforced by getEstimate().  This gives
+    // an O(1) amortized bound without requiring knowledge of pending
+    // measurements (unlike a time-window trim, which can prune IMUs that a
+    // not-yet-processed measurement still needs).
+    if (imus_.size() > kMaxImuBufferSize) {
+      imus_.pop_front();
+    }
+
     cv_.notify_all();
   }
 
