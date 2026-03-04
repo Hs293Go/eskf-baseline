@@ -3,6 +3,7 @@
 #include "eskf_baseline/eskf.hpp"
 #include "eskf_baseline/eskf_baseline.hpp"
 #include "eskf_baseline/inertial_odometry_driver.hpp"
+#include "geometry_msgs/msg/vector3_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -120,19 +121,27 @@ class EskfNode : public rclcpp::Node {
                 odom_sub_->get_topic_name());
 
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("eskf/estimate", 1);
+    grav_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>(
+        "eskf/estimate_gravity", 1);
 
     timer_ = create_wall_timer(std::chrono::milliseconds(10), [this]() {
       if (driver_.running()) {
-        auto t = get_clock()->now().seconds();
+        auto now = get_clock()->now();
+        auto t = now.seconds();
         const auto& [ctx, outcome] = driver_.getEstimate(t);
         nav_msgs::msg::Odometry odom;
-        odom.header.stamp = get_clock()->now();
+        odom.header.stamp = now;
         odom.header.frame_id = frame_id_;
         odom.pose.pose.position = tf2::toMsg(ctx.est.x.p);
         odom.pose.pose.orientation = tf2::toMsg(ctx.est.x.q);
         tf2::toMsg(ctx.est.x.v, odom.twist.twist.linear);
         tf2::toMsg(angular_velocity_, odom.twist.twist.angular);
         odom_pub_->publish(odom);
+
+        geometry_msgs::msg::Vector3Stamped grav;
+        grav.header.stamp = now;
+        tf2::toMsg(ctx.est.x.grav_vector, grav.vector);
+        grav_pub_->publish(grav);
       }
     });
 
@@ -263,6 +272,7 @@ class EskfNode : public rclcpp::Node {
   Eigen::Vector3d angular_velocity_ = Eigen::Vector3d::Zero();
   rclcpp::SubscriptionBase::SharedPtr odom_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr grav_pub_;
   eskf::InertialOdometryDriver<Eskf> driver_;
   rclcpp::TimerBase::SharedPtr timer_;
   diagnostic_updater::Updater diag_;
