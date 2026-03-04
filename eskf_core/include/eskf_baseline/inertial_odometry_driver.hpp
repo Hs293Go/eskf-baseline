@@ -2,6 +2,7 @@
 #define ESKF_BASELINE_INERTIAL_ODOMETRY_DRIVER_HPP_
 
 #include <algorithm>
+#include <cassert>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -25,9 +26,14 @@ using std::ranges::lower_bound;
 using std::ranges::upper_bound;
 
 namespace detail {
+
+/// Visibility
+/// ----------
+///
+/// This class is not meant for public consumption; Maintainers of
+/// InertialOdometryDriver must ensure checkpoints are never empty
 template <TimeStamped T>
 struct Checkpoint {
-  std::deque<T> ckpts_;
   double period = 0.02;
   double max_age = 10.0;
 
@@ -43,6 +49,7 @@ struct Checkpoint {
   // Does not check for empty; caller (the driver itself) is responsible for
   // ensuring non-empty before calling.
   T get(double t) {
+    assert(!ckpts_.empty());
     auto it = upper_bound(ckpts_, t, {}, &T::t);  // first > t
     return *utils::prevOrBegin(it, ckpts_.begin());
   }
@@ -64,12 +71,15 @@ struct Checkpoint {
     }
     // upper_bound returns first crumb with t > meas.t.
     const auto it = upper_bound(ckpts_, t, {}, &T::t);
-    // Since meas.t >= crumbs.front().t, upper_bound cannot return
+    // Since meas.t >= ckpts_.front().t, upper_bound cannot return
     // crumbs.begin()
     ckpts_.erase(it, ckpts_.end());
   }
 
   bool empty() const { return ckpts_.empty(); }
+
+ private:
+  std::deque<T> ckpts_;
 };
 }  // namespace detail
 
@@ -280,6 +290,19 @@ class InertialOdometryDriver {
 
   void push_pose(Measurement meas) {
     std::scoped_lock lock(mtx_);
+
+    // Reject late measurements that fall outside the retention window (
+    // defined relative to the latest IMU data, so it exists only if imus_ is
+    // not empty) before touching history.  Such a measurement cannot trigger a
+    // rebuild (no checkpoint or IMU data backs it up) and would be pruned on
+    // the very next pruneHistory call.
+    if (meas.t <= processed_up_to_t_ && !imus_.empty()) {
+      const double keep_from = imus_.back().t - max_ckpt_age_;
+      if (meas.t < keep_from) {
+        return;
+      }
+    }
+
     const auto insert_pt = upper_bound(meas_hist_, meas.t, {}, &Measurement::t);
     const auto insert_idx = std::distance(meas_hist_.begin(), insert_pt);
     meas_hist_.insert(insert_pt, meas);
@@ -298,16 +321,6 @@ class InertialOdometryDriver {
     }
 
     if (meas.t <= processed_up_to_t_) {
-      // If it's too old to replay, don't arm rebuild. (Still keep it in
-      // history; it'll be skipped naturally.)
-      if (!imus_.empty()) {
-        const double keep_from = imus_.back().t - max_ckpt_age_;
-        if (meas.t < keep_from) {
-          cv_.notify_all();
-          return;
-        }
-      }
-
       if (!late_meas_trigger_t_ || meas.t < *late_meas_trigger_t_) {
         late_meas_trigger_t_ = meas.t;
       }
@@ -780,6 +793,13 @@ class InertialOdometryDriver {
     rebuild_ = std::move(plan);
   }
 
+  /// Safety
+  /// ------
+  ///
+  /// This method does not acquire any lock and must be called under a lock by
+  /// its callers, likely along two code paths: Continuous processing on a
+  /// worker thread, and one-shot processing triggered by external calls to
+  /// processOnce().
   ProcessResult processOnceImpl() {
     const auto tic = Clk::now();
     stats_.updateProcessIterCount();
@@ -835,16 +855,19 @@ class InertialOdometryDriver {
     };
 
     // Streaming mode: O(M) single forward pass.
+
+    // Drain any measurements that predate all available IMU data in one pass.
+    // imus_.front().t <= head_t always, so t < imus_.front().t implies t <
+    // head_t — no separate head_t guard is needed here.
+    while (meas_next_idx_ < meas_hist_.size() &&
+           meas_hist_[meas_next_idx_].t < imus_.front().t) {
+      ++meas_next_idx_;
+    }
+
     if (meas_next_idx_ < meas_hist_.size()) {
       const auto& first = meas_hist_[meas_next_idx_];
 
       if (first.t <= head_t) {
-        if (first.t < imus_.front().t) {
-          // Before all available IMU data; skip and retry next call.
-          ++meas_next_idx_;
-          return ProcessResult::kContinue;
-        }
-
         // One-time rewind: get the best checkpoint seed at or before the first
         // pending measurement.  Discard stale future checkpoints — they were
         // produced before this batch of corrections.
@@ -996,7 +1019,7 @@ class InertialOdometryDriver {
   bool halted_ = false;
   Errc halted_reason_ = Errc::kSuccess;  // or kUnknown
   double halted_t_ = -std::numeric_limits<double>::infinity();
-  std::string_view halted_msg_;
+  std::string halted_msg_;
 
   mutable StatsContainer stats_;
 };
