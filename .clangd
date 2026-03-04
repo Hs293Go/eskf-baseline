@@ -1,2 +1,5 @@
+If:
+  PathMatch:
+    - eskf_ros/.*
 CompileFlags:
-  Add: -I/usr/include/eigen3
+  CompilationDatabase: ../../build/eskf_baseline
