@@ -24,6 +24,7 @@ namespace eskf {
 using std::ranges::lower_bound;
 using std::ranges::upper_bound;
 
+namespace detail {
 template <TimeStamped T>
 struct Checkpoint {
   std::deque<T> ckpts_;
@@ -38,17 +39,12 @@ struct Checkpoint {
     }
   }
 
+  // Get the checkpoint with the largest t <= input t.
+  // Does not check for empty; caller (the driver itself) is responsible for
+  // ensuring non-empty before calling.
   T get(double t) {
     auto it = upper_bound(ckpts_, t, {}, &T::t);  // first > t
     return *utils::prevOrBegin(it, ckpts_.begin());
-  }
-
-  std::optional<T> tryGet(double t) {
-    auto it = upper_bound(ckpts_, t, {}, &T::t);  // first > t
-    if (it == ckpts_.begin()) {
-      return std::nullopt;
-    }
-    return *prev(it);
   }
 
   void eraseUntil(double keep_from) {
@@ -75,6 +71,7 @@ struct Checkpoint {
 
   bool empty() const { return ckpts_.empty(); }
 };
+}  // namespace detail
 
 struct StalenessStatus {
   double imu_head_t;         // if no IMU, -inf
@@ -431,6 +428,20 @@ class InertialOdometryDriver {
     return max_ckpt_age_;
   }
 
+  bool setCkptPeriod(double ckpt_period) {
+    std::scoped_lock lock(mtx_);
+    if (ckpt_period <= 0) {
+      return false;
+    }
+    ckpts_.period = ckpt_period;
+    return true;
+  }
+
+  double ckptPeriod() const {
+    std::shared_lock lock(mtx_);
+    return ckpts_.period;
+  }
+
   EstimationOutcome last_predict_outcome() const {
     std::shared_lock lock(mtx_);
     return last_predict_outcome_;
@@ -465,8 +476,7 @@ class InertialOdometryDriver {
     imus_.clear();
     post_ = {.t = t0, .est = post0};
     prio_ = {.t = t0, .est = post0};
-    ckpts_.setSingle(post_);
-
+    ckpts_.setSingle(post_);  // Maintain invariant: Checkpoints are never empty
     processed_up_to_t_ = -std::numeric_limits<double>::infinity();
     meas_next_idx_ = 0;
     rebuild_.reset();
@@ -695,6 +705,7 @@ class InertialOdometryDriver {
 
     // Prune checkpoints older than keep_from, but keep at least one
     ckpts_.eraseUntil(keep_from);
+    // Maintain invariant: Checkpoints are never empty
     if (ckpts_.empty()) {
       ckpts_.setSingle(post_);
     }
@@ -733,7 +744,10 @@ class InertialOdometryDriver {
     auto m1 = upper_bound(meas_hist_, head_t, {}, &Measurement::t);
     plan.meas.assign(m0, m1);
 
-    // Initialize rebuilt checkpoints with the seed
+    // Initialize rebuilt checkpoints with the seed, using the same period as
+    // the live checkpoint store so setCkptPeriod() is reflected in rebuilds.
+    plan.new_ckpts.period = ckpts_.period;
+    // Maintain invariant: Checkpoints are never empty
     plan.new_ckpts.setSingle(seed);
 
     // Initialize IMU ZOH state at plan.ctx.t using upper_bound on plan.imus
@@ -803,52 +817,77 @@ class InertialOdometryDriver {
           [this](const auto&... args) { updateLastPredictOutcome(args...); });
     };
 
-    while (meas_next_idx_ < meas_hist_.size()) {
-      const auto& meas = meas_hist_[meas_next_idx_];
+    // Streaming mode: O(M) single forward pass.
+    if (meas_next_idx_ < meas_hist_.size()) {
+      const auto& first = meas_hist_[meas_next_idx_];
 
-      if (meas.t > head_t) {
-        // Break out of loop only since we may still need to propagate to
-        // head_t below
-        break;
-      }
+      if (first.t <= head_t) {
+        if (first.t < imus_.front().t) {
+          // Before all available IMU data; skip and retry next call.
+          ++meas_next_idx_;
+          return ProcessResult::kContinue;
+        }
 
-      if (meas.t < imus_.front().t) {
-        // This measurement is before any available IMU data, so we can't
-        // propagate and can return now
-        ++meas_next_idx_;
+        // One-time rewind: get the best checkpoint seed at or before the first
+        // pending measurement.  Discard stale future checkpoints — they were
+        // produced before this batch of corrections.
+        {
+          Context seed = ckpts_.get(first.t);
+          // Respects invariant: erasure will not empty out checkpoints
+          ckpts_.eraseAfter(first.t);
+          prio_ = seed;
+        }
+
+        if (!propagate(imus_, prio_, first.t)) {
+          haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
+                 last_predict_outcome_.message);
+          return ProcessResult::kExit;
+        }
+
+        while (meas_next_idx_ < meas_hist_.size()) {
+          const auto& meas = meas_hist_[meas_next_idx_];
+          if (meas.t > head_t) {
+            break;
+          }
+
+          // prio_ is at meas.t — apply correction.
+          CorrectEC ec = correctImpl(prio_, meas);
+          prio_.t = meas.t;
+          updateLastCorrectOutcome(prio_, ec);
+          ckpts_.tryPush(prio_);
+          processed_up_to_t_ = std::max(processed_up_to_t_, meas.t);
+          ++meas_next_idx_;
+
+          // Propagate to the next measurement or to head_t, whichever comes
+          // first.  Each IMU segment is covered exactly once across the loop.
+          double next_t = head_t;
+          if (meas_next_idx_ < meas_hist_.size()) {
+            const double nt = meas_hist_[meas_next_idx_].t;
+            if (nt <= head_t) {
+              next_t = nt;
+            }
+          }
+
+          if (next_t > prio_.t) {
+            if (!propagate(imus_, prio_, next_t)) {
+              haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
+                     last_predict_outcome_.message);
+              return ProcessResult::kExit;
+            }
+          }
+        }
+
+        // prio_ has been propagated to head_t; commit and prune once.
+        post_ = prio_;
+        pruneHistory(post_.t);
         return ProcessResult::kContinue;
       }
-
-      Context seed = ckpts_.get(meas.t);
-      ckpts_.eraseAfter(meas.t);
-
-      prio_ = seed;
-      if (!propagate(imus_, prio_, meas.t)) {
-        haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
-               last_predict_outcome_.message);
-        return ProcessResult::kExit;  // Propagation error is fatal
-      }
-      CorrectEC ec = correctImpl(prio_, meas);
-      prio_.t = meas.t;
-      updateLastCorrectOutcome(prio_, ec);
-
-      ckpts_.tryPush(prio_);  // checkpoint after measurement update
-      if (!propagate(imus_, prio_, head_t)) {
-        haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
-               last_predict_outcome_.message);
-        return ProcessResult::kExit;  // Propagation error is fatal
-      }
-
-      post_ = prio_;
-      processed_up_to_t_ = std::max(processed_up_to_t_, meas.t);
-      ++meas_next_idx_;
-
-      pruneHistory(post_.t);  // Retain bounded history
     }
 
+    // Pure IMU propagation: no pending measurements in (post_.t, head_t].
     if (head_t > post_.t) {
       prio_ = post_;
-      if (!propagate(imus_, prio_, imus_.back().t)) {
+      if (!propagate(imus_, prio_, head_t)) {
         haltAt(last_predict_outcome_.t, last_predict_outcome_.status,
                last_predict_outcome_.message);
         return ProcessResult::kExit;  // Propagation error is fatal
@@ -899,7 +938,7 @@ class InertialOdometryDriver {
   Context post_;
 
   // time-ordered checkpoint history covering (head_t - max_age) until head_t
-  Checkpoint<Context> ckpts_;
+  detail::Checkpoint<Context> ckpts_;
   double max_ckpt_age_ = 10.0;
 
   mutable std::shared_mutex mtx_;
@@ -924,8 +963,8 @@ class InertialOdometryDriver {
 
     double last_meas_encountered_t = -std::numeric_limits<double>::infinity();
 
-    // Rebuilt checkpoints
-    Checkpoint<Context> new_ckpts = {.period = 0.02};
+    // Rebuilt checkpoints (period is set in startRebuild from ckpts_.period)
+    detail::Checkpoint<Context> new_ckpts;
 
     Context ctx;  // current in-progress context during replay
 
