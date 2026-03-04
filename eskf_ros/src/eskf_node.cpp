@@ -140,6 +140,7 @@ class EskfNode : public rclcpp::Node {
 
         geometry_msgs::msg::Vector3Stamped grav;
         grav.header.stamp = now;
+        grav.header.frame_id = frame_id_;
         tf2::toMsg(ctx.est.x.grav_vector, grav.vector);
         grav_pub_->publish(grav);
       }
