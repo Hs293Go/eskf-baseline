@@ -27,15 +27,14 @@ eskf::BasicErrorContext Eskf::correct(Estimate& ctx,
       hjac * ctx.P * hjac.transpose() + meas.R;
 
   auto llt_fac = scov.llt();
-  double mahalanobis_distance = 0;
   const bool llt_success = llt_fac.info() == Eigen::Success;
-  if (llt_success) {
-    mahalanobis_distance = y.dot(llt_fac.solve(y));
-  } else {
-    mahalanobis_distance = y.dot(
-        scov.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(y));
+  if (!llt_success) {
+    return {
+        .ec = eskf::Errc::kFatalLinalgFailure,
+        .custom_message = "LLT decomposition failed for innovation covariance"};
   }
 
+  const double mahalanobis_distance = y.dot(llt_fac.solve(y));
   const auto classification =
       outlier_classifier_.classify(mahalanobis_distance);
   if (classification == eskf::OutlierClassification::kError) {
@@ -47,16 +46,9 @@ eskf::BasicErrorContext Eskf::correct(Estimate& ctx,
     errc = eskf::Errc::kOutlierDetected;
   }
 
-  if (!llt_success) {
-    return {
-        .ec = eskf::Errc::kFatalLinalgFailure,
-        .custom_message = "LLT decomposition failed for innovation covariance"};
-  }
-
-  const Eigen::Matrix<double, kTangentDim, 6> p_by_ht =
-      ctx.P * hjac.transpose();
+  // Solve K.' = S.' / (P * H.').' instead of K = P * H.' \ S
   const Eigen::Matrix<double, kTangentDim, 6> kgain =
-      llt_fac.solve(p_by_ht.transpose()).transpose();
+      llt_fac.solve(hjac * ctx.P.transpose()).transpose();
 
   Covariance i_m_km = -kgain * hjac;
   i_m_km.diagonal().array() += 1.0;
@@ -67,6 +59,7 @@ eskf::BasicErrorContext Eskf::correct(Estimate& ctx,
 
   return {.ec = errc};
 }
+
 bool Eskf::setConfig(const eskf::Config<double>& cfg) {
   if (cfg.accel_noise_density <= 0 || cfg.gyro_noise_density <= 0) {
     return false;
