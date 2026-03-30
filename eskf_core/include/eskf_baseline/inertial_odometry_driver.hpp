@@ -264,7 +264,7 @@ class InertialOdometryDriver {
     cv_.notify_all();
   }
 
-  void push_imu(Input imu) {
+  void pushImu(Input imu) {
     std::scoped_lock lock(mtx_);
 
     // Halted is terminal until reset(); discard incoming data.
@@ -288,7 +288,7 @@ class InertialOdometryDriver {
     cv_.notify_all();
   }
 
-  void push_pose(Measurement meas) {
+  void pushPose(Measurement meas) {
     std::scoped_lock lock(mtx_);
 
     // Reject late measurements that fall outside the retention window (

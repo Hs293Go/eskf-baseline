@@ -75,8 +75,8 @@ TEST_F(TestDriverThreaded, StartStopIdempotent_NoDeadlock) {
   driver_.start();
   driver_.start();  // idempotent
 
-  driver_.push_imu({.t = 1.0, .seq = 1});
-  driver_.push_pose({.t = 1.0, .seq = 10});
+  driver_.pushImu({.t = 1.0, .seq = 1});
+  driver_.pushPose({.t = 1.0, .seq = 10});
 
   // Give worker a chance (but don't rely on time; just pump via processOnce
   // too)
@@ -93,9 +93,9 @@ TEST_F(TestDriverThreaded, ResetWhileRunning) {
   driver_.start();
 
   // Phase 1: push and wait until caught up
-  driver_.push_imu({.t = 1.0, .seq = 1});
-  driver_.push_imu({.t = 2.0, .seq = 2});
-  driver_.push_pose({.t = 2.0, .seq = 20});
+  driver_.pushImu({.t = 1.0, .seq = 1});
+  driver_.pushImu({.t = 2.0, .seq = 2});
+  driver_.pushPose({.t = 2.0, .seq = 20});
 
   PumpUntil(driver_, [](const eskf::StalenessStatus& s) {
     return !s.rebuilding && !s.late_meas_trigger_t.has_value() &&
@@ -115,8 +115,8 @@ TEST_F(TestDriverThreaded, ResetWhileRunning) {
   driver_.resetState(100.0);
 
   // Phase 2: new data only
-  driver_.push_imu({.t = 100.5, .seq = 3});
-  driver_.push_pose({.t = 100.5, .seq = 50});
+  driver_.pushImu({.t = 100.5, .seq = 3});
+  driver_.pushPose({.t = 100.5, .seq = 50});
 
   PumpUntil(driver_, [](const eskf::StalenessStatus& s) {
     return !s.rebuilding && !s.late_meas_trigger_t.has_value() &&
@@ -138,7 +138,7 @@ TEST_F(TestDriverThreaded, StopHaltsProcessing) {
   driver_.reset(0.0);
   driver_.start();
 
-  driver_.push_imu({.t = 1.0, .seq = 1});
+  driver_.pushImu({.t = 1.0, .seq = 1});
   PumpUntil(driver_, [](auto s) { return s.post_t >= 1.0 - 1e-12; });
 
   driver_.stop();
@@ -146,7 +146,7 @@ TEST_F(TestDriverThreaded, StopHaltsProcessing) {
   const auto before = driver_.status().post_t;
 
   // Push more data; worker should not process
-  driver_.push_imu({.t = 2.0, .seq = 2});
+  driver_.pushImu({.t = 2.0, .seq = 2});
   // spin a bit
   for (int i = 0; i < 10000; ++i) {
     std::this_thread::yield();
@@ -160,7 +160,7 @@ TEST_F(TestDriverThreaded, RestartAfterStopWorks) {
   driver_.reset(0.0);
   driver_.start();
 
-  driver_.push_imu({.t = 1.0, .seq = 1});
+  driver_.pushImu({.t = 1.0, .seq = 1});
   PumpUntil(driver_, [](auto s) { return s.post_t >= 1.0 - 1e-12; });
 
   driver_.stop();
@@ -169,8 +169,8 @@ TEST_F(TestDriverThreaded, RestartAfterStopWorks) {
   clear_calls();
 
   driver_.start();
-  driver_.push_imu({.t = 100.5, .seq = 2});
-  driver_.push_pose({.t = 100.5, .seq = 50});
+  driver_.pushImu({.t = 100.5, .seq = 2});
+  driver_.pushPose({.t = 100.5, .seq = 50});
 
   PumpUntil(driver_, [](auto s) {
     return (s.post_t >= 100.5 - 1e-12) &&
@@ -198,7 +198,7 @@ TEST_F(TestDriverThreaded, ResetWakesWorker_NoHang) {
   driver_.resetState(10.0);
 
   // Now push data and ensure it processes from new epoch.
-  driver_.push_imu({.t = 10.1, .seq = 1});
+  driver_.pushImu({.t = 10.1, .seq = 1});
   PumpUntil(driver_, [](auto s) { return s.post_t >= 10.1 - 1e-12; });
 
   driver_.stop();
@@ -211,7 +211,7 @@ TEST_F(TestDriverThreaded, ConcurrentGetState) {
 
   // Feed a bunch of IMUs.
   for (int i = 1; i <= 200; ++i) {
-    driver_.push_imu({.t = i * 0.01, .seq = i});
+    driver_.pushImu({.t = i * 0.01, .seq = i});
   }
 
   std::atomic<bool> stop_readers{false};
@@ -246,21 +246,21 @@ TEST_F(TestDriverThreaded, StopDuringRebuild_ExitsCleanly) {
   driver_.start();
 
   // IMU coverage
-  driver_.push_imu({.t = 1.0, .seq = 10});
-  driver_.push_imu({.t = 2.0, .seq = 11});
-  driver_.push_imu({.t = 3.0, .seq = 12});
-  driver_.push_imu({.t = 4.0, .seq = 13});
+  driver_.pushImu({.t = 1.0, .seq = 10});
+  driver_.pushImu({.t = 2.0, .seq = 11});
+  driver_.pushImu({.t = 3.0, .seq = 12});
+  driver_.pushImu({.t = 4.0, .seq = 13});
 
   // On-time poses
-  driver_.push_pose({.t = 1.0, .seq = 1});
-  driver_.push_pose({.t = 2.0, .seq = 2});
-  driver_.push_pose({.t = 3.0, .seq = 3});
+  driver_.pushPose({.t = 1.0, .seq = 1});
+  driver_.pushPose({.t = 2.0, .seq = 2});
+  driver_.pushPose({.t = 3.0, .seq = 3});
 
   PumpUntil(driver_, IsIdleAndCaughtUp);
   clear_calls();
 
   // Insert late measurement to trigger rebuild
-  driver_.push_pose({.t = 2.2, .seq = 22});
+  driver_.pushPose({.t = 2.2, .seq = 22});
 
   // Make rebuild slow
   driver_.setMaxEvents(1);

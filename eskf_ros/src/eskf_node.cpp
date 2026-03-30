@@ -55,7 +55,7 @@ class EskfNode : public rclcpp::Node {
             imu.data.accel *= 9.81;
           }
 
-          driver_.push_imu(imu);
+          driver_.pushImu(imu);
         });
     RCLCPP_INFO(this->get_logger(), "Subscribing to IMU on: %s",
                 imu_sub_->get_topic_name());
@@ -97,7 +97,7 @@ class EskfNode : public rclcpp::Node {
             meas.R = rcov_;
 
             tryInitDriver(time, meas);
-            driver_.push_pose(meas);
+            driver_.pushPose(meas);
           });
     } else {
       odom_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -111,7 +111,7 @@ class EskfNode : public rclcpp::Node {
             meas.R = rcov_;
 
             tryInitDriver(time, meas);
-            driver_.push_pose(meas);
+            driver_.pushPose(meas);
           });
     }
     RCLCPP_INFO(this->get_logger(),
