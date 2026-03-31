@@ -1,5 +1,6 @@
 If:
   PathMatch:
     - eskf_ros/.*
+    - loam-baseline/*
 CompileFlags:
   CompilationDatabase: ../../build/eskf_baseline

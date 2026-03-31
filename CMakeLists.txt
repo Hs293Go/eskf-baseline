@@ -8,6 +8,7 @@ if(DEFINED MODULE_NAME)
 endif()
 
 add_subdirectory(eskf_core)
+add_subdirectory(loam-baseline)
 
 if(DEFINED MODULE_NAME AND SKBUILD_PROJECT_NAME)
   add_subdirectory(module)

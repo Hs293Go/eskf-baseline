@@ -1,0 +1,28 @@
+# loam_node parameters
+# Remappings expected:
+#   eskf/imu        → /livox/imu   (or your IMU topic)
+#   loam/feature_info → /arise_slam_mid360/feature_info
+
+loam_node:
+  ros__parameters:
+    # IMU
+    accelerometer_unit_is_g: true
+
+    # ESKF noise densities (tune to your IMU data sheet)
+    accel_noise_density: 1.0
+    gyro_noise_density:  0.01
+
+    # LidarSLAM — match arise_slam's voxel resolution
+    icp_max_iter: 4
+    line_res:     0.2
+    plane_res:    0.4
+    max_surface_features: 2000
+
+    # Minimum measurement noise floor fed into the ESKF correction.
+    # Set conservatively: LOAM covariance from a single scan can be
+    # overconfident in well-structured environments.
+    pos_min_stddev:     0.05   # metres
+    ori_min_stddev_deg: 2.0    # degrees
+
+    # Diagnostics
+    diag_hz: 1.0
