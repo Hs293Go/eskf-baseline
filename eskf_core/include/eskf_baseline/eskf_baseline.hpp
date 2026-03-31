@@ -2,7 +2,7 @@
 #define ESKF_MATH_ESKF_MATH_HPP_
 
 #include "Eigen/Dense"
-#include "eskf_baseline/math.hpp"
+#include "manifold_baseline/manifold_baseline.hpp"
 
 namespace eskf {
 
@@ -19,7 +19,7 @@ struct NominalState {
   NominalState<T> boxplus(const Eigen::Vector<T, kTangentDim>& delta) const {
     return {
         .p = p + delta.template head<3>(),
-        .q = q * rotation::AngleAxisToQuaternion(delta.template segment<3>(3)),
+        .q = q * manifold::AngleAxisToQuaternion(delta.template segment<3>(3)),
         .v = v + delta.template segment<3>(6),
         .accel_bias = accel_bias + delta.template segment<3>(9),
         .gyro_bias = gyro_bias + delta.template segment<3>(12),
@@ -61,7 +61,7 @@ NominalState<Scalar> Motion(const NominalState<Scalar>& state,
 
   return {
       .p = p + v * dt,
-      .q = q * rotation::AngleAxisToQuaternion(delta_angle),
+      .q = q * manifold::AngleAxisToQuaternion(delta_angle),
       .v = v + delta_velocity,
       .accel_bias = accel_bias,
       .gyro_bias = gyro_bias,
@@ -105,12 +105,12 @@ Jacobians<Scalar> MotionJacobians(const NominalState<Scalar>& state,
   fjac(seq3(0), seq3(6)) = dt * Eigen::Matrix3<Scalar>::Identity();
 
   // Rotation
-  fjac(seq3(3), seq3(3)) = rotation::AngleAxisToRotationMatrix(-delta_angle);
+  fjac(seq3(3), seq3(3)) = manifold::AngleAxisToRotationMatrix(-delta_angle);
   fjac(seq3(3), seq3(12)) = -dt * Eigen::Matrix3<Scalar>::Identity();
 
   const Eigen::Matrix3<Scalar> rmat = q.toRotationMatrix();
   // Velocity
-  fjac(seq3(6), seq3(3)) = -dt * rmat * rotation::hat(acc_unbiased);
+  fjac(seq3(6), seq3(3)) = -dt * rmat * manifold::hat(acc_unbiased);
   fjac(seq3(6), seq3(6)).setIdentity();
   fjac(seq3(6), seq3(9)) = -dt * rmat;
   fjac(seq3(6), seq3(15)) = dt * Eigen::Matrix3<Scalar>::Identity();
@@ -152,7 +152,7 @@ struct Pose {
   Eigen::Vector<T, 6> boxminus(const Pose<T>& other) const {
     Eigen::Vector<T, 6> res;
     res(seq3(0)) = p - other.p,
-    res(seq3(3)) = rotation::QuaternionToAngleAxis(other.q.inverse() * q);
+    res(seq3(3)) = manifold::QuaternionToAngleAxis(other.q.inverse() * q);
     return res;
   }
 };
@@ -194,7 +194,7 @@ CompassObservationJacobian(const NominalState<Scalar>& state,
   Eigen::Matrix<Scalar, 3, kTangentDim> jacobian =
       Eigen::Matrix<Scalar, 3, kTangentDim>::Zero();
   jacobian(Eigen::all, Eigen::seqN(3, Eigen::fix<3>)) =
-      rotation::hat(state.q.inverse() * mag_inertial);
+      manifold::hat(state.q.inverse() * mag_inertial);
   return jacobian;
 }
 }  // namespace eskf

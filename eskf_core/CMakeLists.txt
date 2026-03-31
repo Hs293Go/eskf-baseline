@@ -34,13 +34,12 @@ target_sources(
          include/eskf_baseline/outlier_classifier.hpp
          include/eskf_baseline/inertial_odometry_driver.hpp
          include/eskf_baseline/stats.hpp
-         include/eskf_baseline/math.hpp
   PRIVATE src/stats.cpp src/outlier_classifier.cpp src/eskf.cpp)
 target_compile_features(eskf_core_eskf_core PUBLIC cxx_std_20)
 target_compile_options(eskf_core_eskf_core PUBLIC $<$<CONFIG:RELEASE>:-O3>)
 target_link_libraries(
   eskf_core_eskf_core
-  PUBLIC Eigen3::Eigen
+  PUBLIC Eigen3::Eigen manifold_baseline::manifold_baseline
   PRIVATE "$<COMPILE_ONLY:$<TARGET_NAME_IF_EXISTS:Boost::math>>"
           "$<COMPILE_ONLY:$<TARGET_NAME_IF_EXISTS:Boost::boost>>")
 add_library(eskf_core::eskf_core ALIAS eskf_core_eskf_core)
