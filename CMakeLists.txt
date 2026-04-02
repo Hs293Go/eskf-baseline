@@ -7,6 +7,7 @@ if(DEFINED MODULE_NAME)
       CACHE BOOL "Disable building tests when building python module" FORCE)
 endif()
 
+add_subdirectory(manifold_baseline)
 add_subdirectory(eskf_core)
 add_subdirectory(loam-baseline)
 
