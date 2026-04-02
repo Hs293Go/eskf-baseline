@@ -459,7 +459,7 @@ void KeypointExtractor::setKeyPointsLabels(KeypointExtractorResult& out) {
       if (label_[s][i][kEdge]) {
         out.edges.push_back(p);
       }
-      if (label_[s][i][kPlane]) {
+      if (label_[s][i][kPlane] || label_[s][i][kBlob]) {
         out.planes.push_back(p);
       }
     }

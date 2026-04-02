@@ -131,7 +131,8 @@ Localization::SolveResult Localization::solve(
           break;
         }
       }
-      if (inner_converged || icp_iter == max_iterations - 1) {
+      if ((inner_converged && icp_iter == 0) ||
+          icp_iter == max_iterations - 1) {
         reg_err = EstimateRegistrationError(last_hess);
         break;
       }
