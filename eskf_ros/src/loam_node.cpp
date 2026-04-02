@@ -186,6 +186,7 @@ class LoamNode : public rclcpp::Node {
     // Publishers
     // -----------------------------------------------------------------------
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("eskf/estimate", 1);
+    loam_pub_ = create_publisher<nav_msgs::msg::Odometry>("loam/odom", 1);
     grav_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>(
         "eskf/estimate_gravity", 1);
 
@@ -262,7 +263,9 @@ class LoamNode : public rclcpp::Node {
     }
 
     const double t = rclcpp::Time(msg->header.stamp).seconds();
-    frame_id_ = msg->header.frame_id.empty() ? "map" : msg->header.frame_id;
+    // TODO: Restore the fancy auto-detect/override logic
+    frame_id_ = "world";  // msg->header.frame_id.empty() ? "map" :
+                          // msg->header.frame_id;
 
     // Convert Livox message → PointXYZTIId cloud.
     auto cloud = customMsgToCloud(*msg);
@@ -315,6 +318,12 @@ class LoamNode : public rclcpp::Node {
     auto result = slam_->solve(T_init, edge_pts, plane_pts, icp_max_iter_, dt,
                                prev_pose_);
     slam_->updateMap(result.accept_result, result.pose, edge_pts, plane_pts);
+    nav_msgs::msg::Odometry loam_odom;
+    loam_odom.header.stamp = msg->header.stamp;
+    loam_odom.header.frame_id = frame_id_;
+    loam_odom.pose.pose.position = tf2::toMsg(result.pose.translation);
+    loam_odom.pose.pose.orientation = tf2::toMsg(result.pose.rotation);
+    loam_pub_->publish(loam_odom);
     prev_pose_ = result.pose;
 
     // Build ESKF measurement from LOAM result.
@@ -352,6 +361,7 @@ class LoamNode : public rclcpp::Node {
   rclcpp::SubscriptionBase::SharedPtr imu_sub_;
   rclcpp::SubscriptionBase::SharedPtr lidar_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr loam_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr grav_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr diag_timer_;
