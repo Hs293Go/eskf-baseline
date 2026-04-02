@@ -39,10 +39,11 @@ target_sources(
          include/loam_baseline/irwgn.hpp
          include/loam_baseline/observation_models.hpp
          include/loam_baseline/feature_matcher.hpp
+         include/loam_baseline/keypoint_extractor.hpp
          include/loam_baseline/LocalMap.h
          include/loam_baseline/flann/nanoflann.h
          include/loam_baseline/flann/octree.h
-  PRIVATE src/lidar_slam.cpp)
+  PRIVATE src/lidar_slam.cpp src/keypoint_extractor.cpp)
 
 target_compile_features(loam_baseline_core PUBLIC cxx_std_20)
 target_compile_options(loam_baseline_core PUBLIC $<$<CONFIG:Release>:-O3>)
