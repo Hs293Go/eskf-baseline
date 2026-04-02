@@ -10,6 +10,7 @@
 // H⁻¹→R covariance propagation loop.
 
 #include <memory>
+#include <mutex>
 #include <numbers>
 #include <vector>
 
@@ -166,18 +167,26 @@ class LoamNode : public rclcpp::Node {
           imu.t = rclcpp::Time(msg->header.stamp).seconds();
           tf2::fromMsg(msg->linear_acceleration, imu.data.accel);
           tf2::fromMsg(msg->angular_velocity, imu.data.gyro);
-          angular_velocity_ = imu.data.gyro;
           if (accel_unit_g) {
             imu.data.accel *= 9.81;
           }
-          driver_.pushImu(imu);
+          {
+            std::lock_guard lock(mtx_);
+            angular_velocity_ = imu.data.gyro;
+            driver_.pushImu(imu);
+          }
         });
+    lidar_cbg_ =
+        create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions lidar_opts;
+    lidar_opts.callback_group = lidar_cbg_;
 
     lidar_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
         "livox/lidar", 2,
         [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
           onLidar(msg);
-        });
+        },
+        lidar_opts);
 
     RCLCPP_INFO(get_logger(), "IMU topic:   %s", imu_sub_->get_topic_name());
     RCLCPP_INFO(get_logger(), "Lidar topic: %s", lidar_sub_->get_topic_name());
@@ -191,25 +200,29 @@ class LoamNode : public rclcpp::Node {
         "eskf/estimate_gravity", 1);
 
     timer_ = create_wall_timer(std::chrono::milliseconds(10), [this]() {
-      if (!driver_.running()) {
-        return;
-      }
       const auto now = get_clock()->now();
-      const auto& [ctx, _] = driver_.getEstimate(now.seconds());
-
       nav_msgs::msg::Odometry odom;
-      odom.header.stamp = now;
-      odom.header.frame_id = frame_id_;
-      odom.pose.pose.position = tf2::toMsg(ctx.est.x.p);
-      odom.pose.pose.orientation = tf2::toMsg(ctx.est.x.q);
-      tf2::toMsg(ctx.est.x.v, odom.twist.twist.linear);
-      tf2::toMsg(angular_velocity_, odom.twist.twist.angular);
-      odom_pub_->publish(odom);
-
       geometry_msgs::msg::Vector3Stamped grav;
-      grav.header.stamp = now;
-      grav.header.frame_id = frame_id_;
-      tf2::toMsg(ctx.est.x.grav_vector, grav.vector);
+
+      {
+        std::lock_guard lock(mtx_);
+        if (!driver_.running()) {
+          return;
+        }
+        const auto& [ctx, _] = driver_.getEstimate(now.seconds());
+
+        odom.header.stamp = now;
+        odom.header.frame_id = frame_id_;
+        odom.pose.pose.position = tf2::toMsg(ctx.est.x.p);
+        odom.pose.pose.orientation = tf2::toMsg(ctx.est.x.q);
+        tf2::toMsg(ctx.est.x.v, odom.twist.twist.linear);
+        tf2::toMsg(angular_velocity_, odom.twist.twist.angular);
+
+        grav.header.stamp = now;
+        grav.header.frame_id = frame_id_;
+        tf2::toMsg(ctx.est.x.grav_vector, grav.vector);
+      }
+      odom_pub_->publish(odom);
       grav_pub_->publish(grav);
     });
 
@@ -219,26 +232,33 @@ class LoamNode : public rclcpp::Node {
     diag_.setHardwareID("loam_node");
     diag_.add("eskf/driver",
               [this](diagnostic_updater::DiagnosticStatusWrapper& stat) {
-                const auto ws = driver_.getWindowStats();
-                if (driver_.halted()) {
-                  const auto h = driver_.getHaltedOutcome();
-                  stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
-                               "HALTED: predict failure (or fatal)");
-                  stat.add("halted_t", h.t);
-                  stat.add("halted_reason", static_cast<int>(h.status));
-                  stat.add("halted_msg", std::string(h.message));
-                } else {
-                  int level = diagnostic_msgs::msg::DiagnosticStatus::OK;
-                  std::string msg = "OK";
-                  if (ws.sample_age_s > 1.0) {
-                    level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
-                    msg = "Stats sample stale";
+                eskf::WindowStats ws;
+                eskf::EstimationOutcome h;
+                bool is_halted = false;
+                {
+                  std::lock_guard lock(mtx_);
+                  ws = driver_.getWindowStats();
+                  is_halted = driver_.halted();
+                  if (is_halted) {
+                    h = driver_.getHaltedOutcome();
+                    stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR,
+                                 "HALTED: predict failure (or fatal)");
+                    stat.add("halted_t", h.t);
+                    stat.add("halted_reason", static_cast<int>(h.status));
+                    stat.add("halted_msg", std::string(h.message));
+                  } else {
+                    int level = diagnostic_msgs::msg::DiagnosticStatus::OK;
+                    std::string msg = "OK";
+                    if (ws.sample_age_s > 1.0) {
+                      level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+                      msg = "Stats sample stale";
+                    }
+                    if (ws.predict_fail_hz > 0.0) {
+                      level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
+                      msg = "Predict failures observed";
+                    }
+                    stat.summary(level, msg);
                   }
-                  if (ws.predict_fail_hz > 0.0) {
-                    level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
-                    msg = "Predict failures observed";
-                  }
-                  stat.summary(level, msg);
                 }
                 stat.add("process_hz", ws.process_hz);
                 stat.add("predict_ok_hz", ws.predict_ok_hz);
@@ -264,10 +284,11 @@ class LoamNode : public rclcpp::Node {
 
     const double t = rclcpp::Time(msg->header.stamp).seconds();
     // TODO: Restore the fancy auto-detect/override logic
-    frame_id_ = "world";  // msg->header.frame_id.empty() ? "map" :
-                          // msg->header.frame_id;
-
-    // Convert Livox message → PointXYZTIId cloud.
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      frame_id_ = "world";  // msg->header.frame_id.empty() ? "map" :
+                            // msg->header.frame_id;
+    }  // Convert Livox message → PointXYZTIId cloud.
     auto cloud = customMsgToCloud(*msg);
     const int n_scans = nScansFromCloud(cloud);
 
@@ -281,12 +302,14 @@ class LoamNode : public rclcpp::Node {
         .rotation = Eigen::Quaterniond::Identity(),
         .translation = Eigen::Vector3d::Zero(),
     };
-    if (driver_.running()) {
-      const auto& [ctx, _] = driver_.getEstimate(t);
-      T_init.translation = ctx.est.x.p;
-      T_init.rotation = ctx.est.x.q;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      if (driver_.running()) {
+        const auto& [ctx, _] = driver_.getEstimate(t);
+        T_init.translation = ctx.est.x.p;
+        T_init.rotation = ctx.est.x.q;
+      }
     }
-
     // First frame: seed the local map, start the ESKF, return.
     if (!map_initialized_) {
       slam_->initialize(T_init, edge_pts, plane_pts);
@@ -320,7 +343,10 @@ class LoamNode : public rclcpp::Node {
     slam_->updateMap(result.accept_result, result.pose, edge_pts, plane_pts);
     nav_msgs::msg::Odometry loam_odom;
     loam_odom.header.stamp = msg->header.stamp;
-    loam_odom.header.frame_id = frame_id_;
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      loam_odom.header.frame_id = frame_id_;
+    }
     loam_odom.pose.pose.position = tf2::toMsg(result.pose.translation);
     loam_odom.pose.pose.orientation = tf2::toMsg(result.pose.rotation);
     loam_pub_->publish(loam_odom);
@@ -338,7 +364,10 @@ class LoamNode : public rclcpp::Node {
       meas.R(i, i) = std::max(meas.R(i, i), r_min_diag_(i));
     }
 
-    driver_.pushPose(meas);
+    {
+      std::lock_guard<std::mutex> lock(mtx_);
+      driver_.pushPose(meas);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -370,11 +399,19 @@ class LoamNode : public rclcpp::Node {
   eskf::InertialOdometryDriver<Eskf> driver_;
   loam_baseline::KeypointExtractor kp_extractor_;
   std::unique_ptr<loam_baseline::Localization> slam_;
+
+  std::mutex mtx_;
+  rclcpp::CallbackGroup::SharedPtr lidar_cbg_;
 };
 
 int main(int argc, char* argv[]) {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<LoamNode>());
+
+  rclcpp::executors::MultiThreadedExecutor exec(rclcpp::ExecutorOptions{}, 2);
+  auto node = std::make_shared<LoamNode>();
+  exec.add_node(node);
+  exec.spin();
+
   rclcpp::shutdown();
   return 0;
 }
