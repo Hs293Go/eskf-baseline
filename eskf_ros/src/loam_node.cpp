@@ -1,28 +1,25 @@
 // ESKF + LOAM tightly coupled node.
 //
-// Feature pipeline (arise_slam feature extractor → loam_baseline → ESKF):
-//   feature_info  →  Localization::solve()  →  driver_.pushPose()
-//   imu           →  driver_.pushImu()
+// Feature pipeline (Livox CustomMsg → KeypointExtractor → Localization → ESKF):
+//   /livox/lidar  →  KeypointExtractor  →  Localization::solve()  →
+//   driver_.pushPose() imu           →  driver_.pushImu()
 //
 // The ESKF's propagated estimate at each scan time is used as the LOAM
 // initial guess.  The 6×6 pose covariance from the GN Hessian (H⁻¹) is
 // used directly as the ESKF measurement noise matrix R — completing the
 // H⁻¹→R covariance propagation loop.
 
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl_conversions/pcl_conversions.h>
-
 #include <memory>
 #include <numbers>
 #include <vector>
 
-#include "arise_slam_mid360_msgs/msg/laser_feature.hpp"
 #include "diagnostic_updater/diagnostic_updater.hpp"
 #include "eskf_baseline/eskf.hpp"
 #include "eskf_baseline/eskf_baseline.hpp"
 #include "eskf_baseline/inertial_odometry_driver.hpp"
 #include "geometry_msgs/msg/vector3_stamped.hpp"
+#include "livox_ros_driver2/msg/custom_msg.hpp"
+#include "loam_baseline/keypoint_extractor.hpp"
 #include "loam_baseline/lidar_slam.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -32,24 +29,56 @@
 using eskf::Eskf;
 
 namespace {
+
 template <typename T>
 T sq(T x) noexcept {
   return x * x;
 }
+
 template <typename T>
 T deg2rad(T deg) noexcept {
   return deg * std::numbers::pi_v<T> / T(180);
 }
 
+// Convert a Livox CustomMsg to PointXYZTIId.
+// time field: offset from frame start in seconds (float).
+pcl::PointCloud<PointXYZTIId> customMsgToCloud(
+    const livox_ros_driver2::msg::CustomMsg& msg) {
+  pcl::PointCloud<PointXYZTIId> cloud;
+  cloud.reserve(msg.point_num);
+  for (const auto& lp : msg.points) {
+    PointXYZTIId pt;
+    pt.x = lp.x;
+    pt.y = lp.y;
+    pt.z = lp.z;
+    pt.intensity = lp.reflectivity;
+    pt.laserId = lp.line;
+    pt.time = static_cast<float>(lp.offset_time) * 1e-9f;
+    cloud.push_back(pt);
+  }
+  return cloud;
+}
+
+// Determine number of scan lines from the max laser id present.
+int nScansFromCloud(const pcl::PointCloud<PointXYZTIId>& cloud) {
+  int max_id = 0;
+  for (const auto& p : cloud) {
+    max_id = std::max(max_id, static_cast<int>(p.laserId));
+  }
+  return max_id + 1;
+}
+
 std::vector<Eigen::Vector3d> cloudToEigen(
-    const pcl::PointCloud<pcl::PointXYZI>& cloud) {
+    const pcl::PointCloud<PointXYZTIId>& cloud) {
   std::vector<Eigen::Vector3d> pts;
   pts.reserve(cloud.size());
-  for (const auto& p : cloud.points)
+  for (const auto& p : cloud.points) {
     pts.emplace_back(static_cast<double>(p.x), static_cast<double>(p.y),
                      static_cast<double>(p.z));
+  }
   return pts;
 }
+
 }  // namespace
 
 class LoamNode : public rclcpp::Node {
@@ -64,12 +93,41 @@ class LoamNode : public rclcpp::Node {
     eskf::Config<double> cfg;
     cfg.accel_noise_density = declare_parameter("accel_noise_density", 1.0);
     cfg.gyro_noise_density = declare_parameter("gyro_noise_density", 0.01);
-    if (!driver_.algorithm().setConfig(cfg))
+    if (!driver_.algorithm().setConfig(cfg)) {
       throw std::runtime_error("Invalid ESKF config parameters");
+    }
 
     RCLCPP_INFO(get_logger(),
                 "ESKF: accel_noise_density=%.3f, gyro_noise_density=%.3f",
                 cfg.accel_noise_density, cfg.gyro_noise_density);
+
+    // -----------------------------------------------------------------------
+    // KeypointExtractor configuration
+    // -----------------------------------------------------------------------
+    loam_baseline::KeypointExtractorCfg kp_cfg;
+    kp_cfg.nb_threads = declare_parameter("kp_nb_threads", kp_cfg.nb_threads);
+    kp_cfg.neighbor_width =
+        declare_parameter("kp_neighbor_width", kp_cfg.neighbor_width);
+    kp_cfg.min_distance_to_sensor =
+        declare_parameter("kp_min_distance", kp_cfg.min_distance_to_sensor);
+    kp_cfg.max_distance_to_sensor =
+        declare_parameter("kp_max_distance", kp_cfg.max_distance_to_sensor);
+    kp_cfg.angle_resolution =
+        declare_parameter("kp_angle_resolution", kp_cfg.angle_resolution);
+    kp_cfg.plane_sin_angle_threshold = declare_parameter(
+        "kp_plane_sin_angle_threshold", kp_cfg.plane_sin_angle_threshold);
+    kp_cfg.edge_sin_angle_threshold = declare_parameter(
+        "kp_edge_sin_angle_threshold", kp_cfg.edge_sin_angle_threshold);
+    kp_cfg.dist_to_line_threshold = declare_parameter(
+        "kp_dist_to_line_threshold", kp_cfg.dist_to_line_threshold);
+    kp_cfg.edge_depth_gap_threshold = declare_parameter(
+        "kp_edge_depth_gap_threshold", kp_cfg.edge_depth_gap_threshold);
+    kp_cfg.edge_saliency_threshold = declare_parameter(
+        "kp_edge_saliency_threshold", kp_cfg.edge_saliency_threshold);
+    kp_cfg.edge_intensity_gap_threshold = declare_parameter(
+        "kp_edge_intensity_gap_threshold", kp_cfg.edge_intensity_gap_threshold);
+    kp_extractor_ = loam_baseline::KeypointExtractor(kp_cfg);
+    dynamic_mask_ = declare_parameter("kp_dynamic_mask", false);
 
     // -----------------------------------------------------------------------
     // Localization configuration
@@ -84,12 +142,10 @@ class LoamNode : public rclcpp::Node {
     slam_ = std::make_unique<loam_baseline::Localization>(loc_cfg);
     slam_->matcher.line_res = declare_parameter("line_res", 0.2);
     slam_->matcher.plane_res = declare_parameter("plane_res", 0.4);
-    slam_->matcher.min_line_neighbor_rejection = 4;  // from upstream default
-    slam_->matcher.max_dist_inlier = 0.2;            // from upstream default
+    slam_->matcher.min_line_neighbor_rejection = 4;
+    slam_->matcher.max_dist_inlier = 0.2;
 
-    // Minimum per-element variance floor for the measurement noise matrix R.
-    // Prevents LOAM from claiming perfect certainty when the GN Hessian
-    // is poorly conditioned (e.g., degenerate corridors).
+    // Minimum per-element variance floor for R.
     const double pos_min_std = declare_parameter("pos_min_stddev", 0.05);
     const double ori_min_std_deg = declare_parameter("ori_min_stddev_deg", 2.0);
     r_min_diag_.head<3>().setConstant(sq(pos_min_std));
@@ -111,19 +167,20 @@ class LoamNode : public rclcpp::Node {
           tf2::fromMsg(msg->linear_acceleration, imu.data.accel);
           tf2::fromMsg(msg->angular_velocity, imu.data.gyro);
           angular_velocity_ = imu.data.gyro;
-          if (accel_unit_g) imu.data.accel *= 9.81;
+          if (accel_unit_g) {
+            imu.data.accel *= 9.81;
+          }
           driver_.pushImu(imu);
         });
 
-    feature_sub_ =
-        create_subscription<arise_slam_mid360_msgs::msg::LaserFeature>(
-            "loam/feature_info", 2,
-            [this](const arise_slam_mid360_msgs::msg::LaserFeature::SharedPtr
-                       msg) { onFeature(msg); });
+    lidar_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
+        "livox/lidar", 2,
+        [this](const livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
+          onLidar(msg);
+        });
 
-    RCLCPP_INFO(get_logger(), "IMU topic:     %s", imu_sub_->get_topic_name());
-    RCLCPP_INFO(get_logger(), "Feature topic: %s",
-                feature_sub_->get_topic_name());
+    RCLCPP_INFO(get_logger(), "IMU topic:   %s", imu_sub_->get_topic_name());
+    RCLCPP_INFO(get_logger(), "Lidar topic: %s", lidar_sub_->get_topic_name());
 
     // -----------------------------------------------------------------------
     // Publishers
@@ -133,7 +190,9 @@ class LoamNode : public rclcpp::Node {
         "eskf/estimate_gravity", 1);
 
     timer_ = create_wall_timer(std::chrono::milliseconds(10), [this]() {
-      if (!driver_.running()) return;
+      if (!driver_.running()) {
+        return;
+      }
       const auto now = get_clock()->now();
       const auto& [ctx, _] = driver_.getEstimate(now.seconds());
 
@@ -154,7 +213,7 @@ class LoamNode : public rclcpp::Node {
     });
 
     // -----------------------------------------------------------------------
-    // Diagnostics (mirrors eskf_node)
+    // Diagnostics
     // -----------------------------------------------------------------------
     diag_.setHardwareID("loam_node");
     diag_.add("eskf/driver",
@@ -197,25 +256,24 @@ class LoamNode : public rclcpp::Node {
   }
 
  private:
-  // -------------------------------------------------------------------------
+  void onLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr& msg) {
+    if (msg->point_num == 0) {
+      return;
+    }
 
-  void onFeature(
-      const arise_slam_mid360_msgs::msg::LaserFeature::SharedPtr& msg) {
     const double t = rclcpp::Time(msg->header.stamp).seconds();
-
-    // Decode PCL clouds from the LaserFeature bundle.
-    pcl::PointCloud<pcl::PointXYZI> corner, surface;
-    pcl::fromROSMsg(msg->cloud_corner, corner);
-    pcl::fromROSMsg(msg->cloud_surface, surface);
-    const auto edge_pts = cloudToEigen(corner);
-    const auto plane_pts = cloudToEigen(surface);
-
     frame_id_ = msg->header.frame_id.empty() ? "map" : msg->header.frame_id;
 
-    // Build initial pose guess.
-    //   - Before first LOAM result: use IMU quaternion from the feature msg
-    //     (position unknown → zero).
-    //   - After first result: propagate ESKF to scan time.
+    // Convert Livox message → PointXYZTIId cloud.
+    auto cloud = customMsgToCloud(*msg);
+    const int n_scans = nScansFromCloud(cloud);
+
+    // Extract edge and plane keypoints.
+    auto kp = kp_extractor_.computeKeyPoints(cloud, n_scans, dynamic_mask_);
+    const auto edge_pts = cloudToEigen(kp.edges);
+    const auto plane_pts = cloudToEigen(kp.planes);
+
+    // Build initial pose guess from ESKF if running, else identity.
     manifold::TransformF64 T_init{
         .rotation = Eigen::Quaterniond::Identity(),
         .translation = Eigen::Vector3d::Zero(),
@@ -224,12 +282,6 @@ class LoamNode : public rclcpp::Node {
       const auto& [ctx, _] = driver_.getEstimate(t);
       T_init.translation = ctx.est.x.p;
       T_init.rotation = ctx.est.x.q;
-    } else {
-      T_init.rotation = Eigen::Quaterniond(msg->initial_quaternion_w,
-                                           msg->initial_quaternion_x,
-                                           msg->initial_quaternion_y,
-                                           msg->initial_quaternion_z)
-                            .normalized();
     }
 
     // First frame: seed the local map, start the ESKF, return.
@@ -271,11 +323,11 @@ class LoamNode : public rclcpp::Node {
     meas.data.p = result.pose.translation;
     meas.data.q = result.pose.rotation;
 
-    // Use GN Hessian inverse as R (H⁻¹→R propagation).
-    // Apply a per-element variance floor to guard against degenerate scans.
+    // Use GN Hessian inverse as R; apply variance floor for degenerate scans.
     meas.R = result.reg_err.cov;
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < 6; ++i) {
       meas.R(i, i) = std::max(meas.R(i, i), r_min_diag_(i));
+    }
 
     driver_.pushPose(meas);
   }
@@ -283,6 +335,7 @@ class LoamNode : public rclcpp::Node {
   // -------------------------------------------------------------------------
 
   bool map_initialized_ = false;
+  bool dynamic_mask_ = false;
   std::string frame_id_ = "map";
   Eigen::Vector3d angular_velocity_ = Eigen::Vector3d::Zero();
   int icp_max_iter_ = 4;
@@ -297,7 +350,7 @@ class LoamNode : public rclcpp::Node {
       Eigen::Matrix<double, 6, 1>::Ones() * 1e-4;
 
   rclcpp::SubscriptionBase::SharedPtr imu_sub_;
-  rclcpp::SubscriptionBase::SharedPtr feature_sub_;
+  rclcpp::SubscriptionBase::SharedPtr lidar_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr grav_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
@@ -305,6 +358,7 @@ class LoamNode : public rclcpp::Node {
   diagnostic_updater::Updater diag_;
 
   eskf::InertialOdometryDriver<Eskf> driver_;
+  loam_baseline::KeypointExtractor kp_extractor_;
   std::unique_ptr<loam_baseline::Localization> slam_;
 };
 
