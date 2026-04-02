@@ -10,19 +10,32 @@ loam_node:
 
     # ESKF noise densities (tune to your IMU data sheet)
     accel_noise_density: 1.0
-    gyro_noise_density:  0.01
+    gyro_noise_density: 0.01
 
     # LidarSLAM — match arise_slam's voxel resolution
-    icp_max_iter: 4
-    line_res:     0.2
-    plane_res:    0.4
+    # arise_slam livox_mid360.yaml: max_iterations=5, mapping_line_resolution=0.1,
+    #   mapping_plane_resolution=0.2, velocity_failure_threshold=30.0, min_range=0.1
+    icp_max_iter: 5
+    line_res: 0.1
+    plane_res: 0.2
     max_surface_features: 2000
+
+    # Point subsampling: arise_slam skips 3 out of every 4 points (point_skip_num: 3).
+    # Set to 0 to disable (process all points), or 3 to match arise_slam.
+    point_skip_num: 3
+
+    # arise_slam min_range: 0.1 m
+    kp_min_distance: 0.1
+
+    # arise_slam velocity_failure_threshold: 30.0 m/s
+    velocity_failure_threshold: 30.0
 
     # Minimum measurement noise floor fed into the ESKF correction.
     # Set conservatively: LOAM covariance from a single scan can be
     # overconfident in well-structured environments.
-    pos_min_stddev:     0.05   # metres
-    ori_min_stddev_deg: 2.0    # degrees
+    pos_min_stddev: 0.05 # metres
+    ori_min_stddev_deg: 2.0 # degrees
 
     # Diagnostics
     diag_hz: 1.0
+    override_world_frame_id: world
