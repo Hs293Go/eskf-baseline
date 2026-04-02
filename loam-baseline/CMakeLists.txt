@@ -35,17 +35,13 @@ target_sources(
          BASE_DIRS
          include
          FILES
-         # include/loam_baseline/lidarResiduals.hpp
          include/loam_baseline/lidar_slam.hpp
+         include/loam_baseline/irwgn.hpp
+         include/loam_baseline/observation_models.hpp
+         include/loam_baseline/feature_matcher.hpp
          include/loam_baseline/LocalMap.h
-         include/loam_baseline/utils/EigenTypes.h
-         include/loam_baseline/utils/Twist.h
-         include/loam_baseline/utils/utility.h
-         include/loam_baseline/utils/Utilities.h
          include/loam_baseline/flann/nanoflann.h
          include/loam_baseline/flann/octree.h
-         include/loam_baseline/sensor_data/LidarPoint.h
-         include/loam_baseline/feature_matcher.hpp
   PRIVATE src/lidar_slam.cpp)
 
 target_compile_features(loam_baseline_core PUBLIC cxx_std_20)

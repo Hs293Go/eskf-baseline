@@ -26,7 +26,6 @@
 
 #include "loam_baseline/flann/nanoflann.h"
 #include "loam_baseline/flann/octree.h"
-#include "loam_baseline/sensor_data/LidarPoint.h"
 
 // #define DONT_USE_SELF_OCTREE
 
