@@ -70,7 +70,7 @@ class EskfNode : public rclcpp::Node {
                 q_imu_pose.w());
 
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-        "/xlju/cybros_autopilot/betaflight/imu", rclcpp::SensorDataQoS(),
+        "eskf/imu", rclcpp::SensorDataQoS(),
         [this,
          accelerometer_unit_is_g](const sensor_msgs::msg::Imu::SharedPtr msg) {
           RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -81,9 +81,9 @@ class EskfNode : public rclcpp::Node {
           tf2::fromMsg(msg->angular_velocity, imu.data.gyro);
           angular_velocity_ = imu.data.gyro;
 
-          // if (accelerometer_unit_is_g) {
-          //   imu.data.accel *= 9.81;
-          // }
+          if (accelerometer_unit_is_g) {
+            imu.data.accel *= 9.81;
+          }
 
           driver_.pushImu(imu);
         });
@@ -91,14 +91,14 @@ class EskfNode : public rclcpp::Node {
                 imu_sub_->get_topic_name());
 
     const bool pose_format_is_odometry =
-        declare_parameter("pose_format_is_odometry", true);
+        declare_parameter("pose_format_is_odometry", false);
 
     double horz_position_meas_stddev =
-        declare_parameter("horz_position_meas_stddev", 0.01);
+        declare_parameter("horz_position_meas_stddev", 0.1);
     double vert_position_meas_stddev =
-        declare_parameter("vert_position_meas_stddev", 0.01);
+        declare_parameter("vert_position_meas_stddev", 0.1);
     double orientation_meas_stddev_deg =
-        declare_parameter("orientation_meas_stddev_deg", 3.0);
+        declare_parameter("orientation_meas_stddev_deg", 5.0);
 
     // Remember to capture this matrix by copying in the callback lambda!!!
     rcov_.diagonal() << sq(horz_position_meas_stddev),
@@ -117,7 +117,7 @@ class EskfNode : public rclcpp::Node {
 
     if (pose_format_is_odometry) {
       odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-          "/laser_odometry", rclcpp::SensorDataQoS(),
+          "eskf/meas", rclcpp::SensorDataQoS(),
           [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                             "Received measurement in nav_msgs/Odometry format");
