@@ -41,19 +41,49 @@ class EskfNode : public rclcpp::Node {
                 "gyro_noise_density=%.3f",
                 cfg.accel_noise_density, cfg.gyro_noise_density);
 
+    // Load extrinsic calibration T_imu_pose (4x4 row-major homogeneous matrix)
+    auto ext_vec = declare_parameter(
+        "extrinsic_T_imu_pose",
+        std::vector<double>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+    if (ext_vec.size() != 16) {
+      throw std::runtime_error(
+          "extrinsic_T_imu_pose must have exactly 16 elements (4x4 "
+          "row-major)");
+    }
+    Eigen::Matrix4d T_imu_pose =
+        Eigen::Map<Eigen::Matrix<double, 4, 4, Eigen::RowMajor>>(
+            ext_vec.data());
+    Eigen::Quaterniond q_imu_pose(T_imu_pose.topLeftCorner<3, 3>());
+    q_imu_pose.normalize();
+    Eigen::Vector3d t_imu_pose = T_imu_pose.topRightCorner<3, 1>();
+
+    // Precompute inverse: T_pose_imu = T_imu_pose^{-1}
+    Eigen::Matrix4d T_pose_imu = T_imu_pose.inverse();
+    q_pose_imu_ = Eigen::Quaterniond(T_pose_imu.topLeftCorner<3, 3>());
+    q_pose_imu_.normalize();
+    t_pose_imu_ = T_pose_imu.topRightCorner<3, 1>();
+
+    RCLCPP_INFO(get_logger(),
+                "Extrinsic T_imu_pose: t=[%f, %f, %f], q=[%f, %f, %f, %f]",
+                t_imu_pose.x(), t_imu_pose.y(), t_imu_pose.z(),
+                q_imu_pose.x(), q_imu_pose.y(), q_imu_pose.z(),
+                q_imu_pose.w());
+
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-        "eskf/imu", 10,
+        "/xlju/cybros_autopilot/betaflight/imu", rclcpp::SensorDataQoS(),
         [this,
          accelerometer_unit_is_g](const sensor_msgs::msg::Imu::SharedPtr msg) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                          "Received imu in sensor_msgs/Imu format");
           Eskf::Input imu = {.t = rclcpp::Time(msg->header.stamp).seconds()};
 
           tf2::fromMsg(msg->linear_acceleration, imu.data.accel);
           tf2::fromMsg(msg->angular_velocity, imu.data.gyro);
           angular_velocity_ = imu.data.gyro;
 
-          if (accelerometer_unit_is_g) {
-            imu.data.accel *= 9.81;
-          }
+          // if (accelerometer_unit_is_g) {
+          //   imu.data.accel *= 9.81;
+          // }
 
           driver_.pushImu(imu);
         });
@@ -61,14 +91,14 @@ class EskfNode : public rclcpp::Node {
                 imu_sub_->get_topic_name());
 
     const bool pose_format_is_odometry =
-        declare_parameter("pose_format_is_odometry", false);
+        declare_parameter("pose_format_is_odometry", true);
 
     double horz_position_meas_stddev =
-        declare_parameter("horz_position_meas_stddev", 0.1);
+        declare_parameter("horz_position_meas_stddev", 0.01);
     double vert_position_meas_stddev =
-        declare_parameter("vert_position_meas_stddev", 0.1);
+        declare_parameter("vert_position_meas_stddev", 0.01);
     double orientation_meas_stddev_deg =
-        declare_parameter("orientation_meas_stddev_deg", 5.0);
+        declare_parameter("orientation_meas_stddev_deg", 3.0);
 
     // Remember to capture this matrix by copying in the callback lambda!!!
     rcov_.diagonal() << sq(horz_position_meas_stddev),
@@ -87,12 +117,17 @@ class EskfNode : public rclcpp::Node {
 
     if (pose_format_is_odometry) {
       odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-          "eskf/meas", 10,
+          "/laser_odometry", rclcpp::SensorDataQoS(),
           [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+            RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+                            "Received measurement in nav_msgs/Odometry format");
             auto time = rclcpp::Time(msg->header.stamp).seconds();
             Eskf::Measurement meas = {.t = time};
             tf2::fromMsg(msg->pose.pose.position, meas.data.p);
             tf2::fromMsg(msg->pose.pose.orientation, meas.data.q);
+            // Transform from pose frame to IMU frame:
+            // T_world_imu = T_world_pose * T_pose_imu
+            transformPoseToImu(meas.data.p, meas.data.q);
             frame_id_ = msg->header.frame_id;
             meas.R = rcov_;
 
@@ -107,6 +142,8 @@ class EskfNode : public rclcpp::Node {
             Eskf::Measurement meas = {.t = time};
             tf2::fromMsg(msg->pose.position, meas.data.p);
             tf2::fromMsg(msg->pose.orientation, meas.data.q);
+            // Transform from pose frame to IMU frame
+            transformPoseToImu(meas.data.p, meas.data.q);
             frame_id_ = msg->header.frame_id;
             meas.R = rcov_;
 
@@ -267,6 +304,14 @@ class EskfNode : public rclcpp::Node {
     }
   }
 
+  // Transform a pose-frame measurement to IMU-frame:
+  // T_world_imu = T_world_pose * T_pose_imu
+  void transformPoseToImu(Eigen::Vector3d& p, Eigen::Quaterniond& q) const {
+    p = p + q * t_pose_imu_;
+    q = q * q_pose_imu_;
+    q.normalize();
+  }
+
  private:
   std::string frame_id_ = "map";
   rclcpp::SubscriptionBase::SharedPtr imu_sub_;
@@ -278,6 +323,10 @@ class EskfNode : public rclcpp::Node {
   rclcpp::TimerBase::SharedPtr timer_;
   diagnostic_updater::Updater diag_;
   rclcpp::TimerBase::SharedPtr diag_timer_;
+
+  // Extrinsic calibration: T_pose_imu (inverse of T_imu_pose)
+  Eigen::Vector3d t_pose_imu_;
+  Eigen::Quaterniond q_pose_imu_;
 
   Eigen::Matrix<double, 6, 6> rcov_ = Eigen::Matrix<double, 6, 6>::Identity();
 };

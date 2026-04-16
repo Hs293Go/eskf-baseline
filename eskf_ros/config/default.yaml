@@ -4,7 +4,13 @@ eskf_node:
     verbose_diagnostics: true
     verbose_diagnostics_hz: 0.25
     accelerometer_unit_is_g: true
-    pose_format_is_odometry: false
+    pose_format_is_odometry: true
     orientation_meas_stddev_deg: 5.0
-    imu_topic: /livox/imu/
+    imu_topic: /xlju/cybros_autopilot/betaflight/imu
     meas_topic: /laser_odometry
+    # extrinsic transformation matrix 
+    # from pose measurement frame (lidar frame) to imu frame. 
+    extrinsic_T_imu_pose: [1.0, 0.0, 0.0, 0.035254,
+                            0.0, 1.0, 0.0, 0.037907,
+                            0.0, 0.0, 1.0, 0.118716,
+                            0.0, 0.0, 0.0, 1.0]
